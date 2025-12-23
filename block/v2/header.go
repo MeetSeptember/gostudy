@@ -49,6 +49,7 @@ type headerFields struct {
 	ReceiptHash         common.Hash    `json:"receiptsRoot"     gencodec:"required"`
 	OutgoingReceiptHash common.Hash    `json:"outgoingReceiptsRoot"     gencodec:"required"`
 	IncomingReceiptHash common.Hash    `json:"incomingReceiptsRoot" gencodec:"required"`
+	IncomingDeployHash  common.Hash    `json:"incomingDeploysRoot" gencodec:"required"`
 	Bloom               ethtypes.Bloom `json:"logsBloom"        gencodec:"required"`
 	Number              *big.Int       `json:"number"           gencodec:"required"`
 	GasLimit            uint64         `json:"gasLimit"         gencodec:"required"`
@@ -139,6 +140,16 @@ func (h *Header) IncomingReceiptHash() common.Hash {
 // SetIncomingReceiptHash sets the ingress transaction receipt trie hash.
 func (h *Header) SetIncomingReceiptHash(newIncomingReceiptHash common.Hash) {
 	h.fields.IncomingReceiptHash = newIncomingReceiptHash
+}
+
+// IncomingDeployHash is the ingress deploy proof trie hash.
+func (h *Header) IncomingDeployHash() common.Hash {
+	return h.fields.IncomingDeployHash
+}
+
+// SetIncomingDeployHash sets the ingress deploy proof trie hash.
+func (h *Header) SetIncomingDeployHash(newIncomingDeployHash common.Hash) {
+	h.fields.IncomingDeployHash = newIncomingDeployHash
 }
 
 // Bloom is the Bloom filter that indexes accounts and topics logged by smart

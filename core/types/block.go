@@ -54,7 +54,7 @@ const (
 
 // Constants for block.
 var (
-	EmptyRootHash  = DeriveSha(Transactions{})
+	EmptyRootHash  = DeriveSha(BlockTransactions{})
 	EmptyUncleHash = CalcUncleHash(nil)
 )
 
@@ -88,14 +88,14 @@ func (n *BlockNonce) UnmarshalText(input []byte) error {
 // BodyInterface is a simple accessor interface for block body.
 type BodyInterface interface {
 	// Transactions returns a deep copy the list of transactions in this block.
-	Transactions() []*Transaction
+	Transactions() BlockTransactions
 
 	// StakingTransactions returns a deep copy of staking transactions
 	StakingTransactions() []*staking.StakingTransaction
 
 	// TransactionAt returns the transaction at the given index in this block.
 	// It returns nil if index is out of bounds.
-	TransactionAt(index int) *Transaction
+	TransactionAt(index int) BlockTransaction
 
 	// StakingTransactionAt returns the staking transaction at the given index in this block.
 	// It returns nil if index is out of bounds.
@@ -107,7 +107,7 @@ type BodyInterface interface {
 
 	// SetTransactions sets the list of transactions with a deep copy of the
 	// given list.
-	SetTransactions(newTransactions []*Transaction)
+	SetTransactions(newTransactions BlockTransactions)
 
 	// SetStakingTransactions sets the list of staking transactions with a deep copy of the
 	// given list.
@@ -127,6 +127,18 @@ type BodyInterface interface {
 	// SetIncomingReceipts sets the list of incoming cross-shard transaction
 	// receipts of this block with a dep copy of the given list.
 	SetIncomingReceipts(newIncomingReceipts CXReceiptsProofs)
+
+	// IncomingDeploys returns a deep copy of the list of incoming deploy proofs of this block.
+	IncomingDeploys() CXDeployProofs
+
+	// SetIncomingDeploys sets the list of incoming deploy proofs of this block with a deep copy of the given list.
+	SetIncomingDeploys(newIncomingDeploys CXDeployProofs)
+
+	// OutgoingDeploys returns outgoing deploy intents.
+	OutgoingDeploys() CXDeploys
+
+	// SetOutgoingDeploys sets outgoing deploy intents.
+	SetOutgoingDeploys(newOutgoingDeploys CXDeploys)
 }
 
 // Body is a simple (mutable, non-safe) data container for storing and moving
@@ -210,9 +222,11 @@ func init() {
 type Block struct {
 	header              *block.Header
 	uncles              []*block.Header
-	transactions        Transactions
+	transactions        BlockTransactions
 	stakingTransactions staking.StakingTransactions
 	incomingReceipts    CXReceiptsProofs
+	incomingDeploys     CXDeployProofs
+	outgoingDeploys     CXDeploys
 
 	// caches
 	hash atomic.Value
@@ -288,25 +302,29 @@ func (b *Block) DeprecatedTd() *big.Int {
 // "external" block encoding. used for eth protocol, etc.
 type extblock struct {
 	Header *block.Header
-	Txs    []*Transaction
+	Txs    BlockTransactions
 	Uncles []*block.Header
 }
 
 // CX-ready extblock
 type extblockV1 struct {
 	Header           *block.Header
-	Txs              []*Transaction
+	Txs              BlockTransactions
 	Uncles           []*block.Header
 	IncomingReceipts CXReceiptsProofs
+	IncomingDeploys  CXDeployProofs
+	OutgoingDeploys  CXDeploys
 }
 
 // includes staking transaction
 type extblockV2 struct {
 	Header           *block.Header
-	Txs              []*Transaction
+	Txs              BlockTransactions
 	Stks             []*staking.StakingTransaction
 	Uncles           []*block.Header
 	IncomingReceipts CXReceiptsProofs
+	IncomingDeploys  CXDeployProofs
+	OutgoingDeploys  CXDeploys
 }
 
 var onceBlockReg sync.Once
@@ -323,17 +341,13 @@ func blockRegistry() *taggedrlp.Registry {
 	return extblockReg
 }
 
-// NewBlock creates a new block. The input data is copied,
-// changes to header and to the field values will not affect the
-// block.
-//
+// NewBlockWithDeploys creates a new block including incoming deploy proofs.
 // The values of TxHash, UncleHash, ReceiptHash and Bloom in header
-// are ignored and set to values derived from the given txs,
-// and receipts.
-func NewBlock(
-	header *block.Header, txs []*Transaction,
+// are ignored and set to values derived from the given txs and receipts.
+func NewBlockWithDeploys(
+	header *block.Header, txs BlockTransactions,
 	receipts []*Receipt, outcxs []*CXReceipt, incxs []*CXReceiptsProof,
-	stks []*staking.StakingTransaction) *Block {
+	incDeploys []*CXDeployProof, stks []*staking.StakingTransaction, outDeploys CXDeploys) *Block {
 
 	b := &Block{header: CopyHeader(header)}
 
@@ -350,14 +364,13 @@ func NewBlock(
 	if len(txs) == 0 && len(stks) == 0 {
 		b.header.SetTxHash(EmptyRootHash)
 	} else {
-		b.transactions = make(Transactions, len(txs))
-		copy(b.transactions, txs)
+		b.transactions = txs.Copy()
 
 		b.stakingTransactions = make(staking.StakingTransactions, len(stks))
 		copy(b.stakingTransactions, stks)
 
 		b.header.SetTxHash(DeriveSha(
-			Transactions(txs),
+			b.transactions,
 			staking.StakingTransactions(stks),
 		))
 	}
@@ -380,8 +393,26 @@ func NewBlock(
 		copy(b.incomingReceipts, incxs)
 	}
 
+	// Put cross-shard deploy proofs into block
+	if len(incDeploys) == 0 {
+		b.header.SetIncomingDeployHash(EmptyRootHash)
+	} else {
+		b.header.SetIncomingDeployHash(DeriveSha(CXDeployProofs(incDeploys)))
+		b.incomingDeploys = make(CXDeployProofs, len(incDeploys))
+		copy(b.incomingDeploys, incDeploys)
+	}
+	b.outgoingDeploys = outDeploys.Copy()
+
 	// Great! Block is finally finalized.
 	return b
+}
+
+// NewBlock preserves the legacy signature without deploy proofs.
+func NewBlock(
+	header *block.Header, txs BlockTransactions,
+	receipts []*Receipt, outcxs []*CXReceipt, incxs []*CXReceiptsProof,
+	stks []*staking.StakingTransaction) *Block {
+	return NewBlockWithDeploys(header, txs, receipts, outcxs, incxs, nil, stks, nil)
 }
 
 // NewBlockWithHeader creates a block with the given header data. The
@@ -412,9 +443,11 @@ func (b *Block) DecodeRLP(s *rlp.Stream) error {
 	}
 	switch eb := eb.(type) {
 	case *extblockV2:
-		b.header, b.uncles, b.transactions, b.incomingReceipts, b.stakingTransactions = eb.Header, eb.Uncles, eb.Txs, eb.IncomingReceipts, eb.Stks
+		b.header, b.uncles, b.transactions, b.incomingReceipts, b.incomingDeploys, b.outgoingDeploys, b.stakingTransactions =
+			eb.Header, eb.Uncles, eb.Txs, eb.IncomingReceipts, eb.IncomingDeploys, eb.OutgoingDeploys, eb.Stks
 	case *extblockV1:
-		b.header, b.uncles, b.transactions, b.incomingReceipts = eb.Header, eb.Uncles, eb.Txs, eb.IncomingReceipts
+		b.header, b.uncles, b.transactions, b.incomingReceipts, b.incomingDeploys, b.outgoingDeploys =
+			eb.Header, eb.Uncles, eb.Txs, eb.IncomingReceipts, eb.IncomingDeploys, eb.OutgoingDeploys
 	case *extblock:
 		b.header, b.uncles, b.transactions, b.incomingReceipts = eb.Header, eb.Uncles, eb.Txs, nil
 	default:
@@ -430,9 +463,9 @@ func (b *Block) EncodeRLP(w io.Writer) error {
 
 	switch h := b.header.Header.(type) {
 	case *v3.Header:
-		eb = extblockV2{b.header, b.transactions, b.stakingTransactions, b.uncles, b.incomingReceipts}
+		eb = extblockV2{b.header, b.transactions, b.stakingTransactions, b.uncles, b.incomingReceipts, b.incomingDeploys, b.outgoingDeploys}
 	case *v2.Header, *v1.Header:
-		eb = extblockV1{b.header, b.transactions, b.uncles, b.incomingReceipts}
+		eb = extblockV1{b.header, b.transactions, b.uncles, b.incomingReceipts, b.incomingDeploys, b.outgoingDeploys}
 	case *v0.Header:
 		if len(b.incomingReceipts) > 0 {
 			return errors.New("incomingReceipts unsupported in v0 block")
@@ -457,8 +490,8 @@ func (b *Block) IsLastBlockInEpoch() bool {
 	return b.header.IsLastBlockInEpoch()
 }
 
-// Transactions returns transactions.
-func (b *Block) Transactions() Transactions {
+// Transactions returns block transactions.
+func (b *Block) Transactions() BlockTransactions {
 	return b.transactions
 }
 
@@ -470,6 +503,16 @@ func (b *Block) StakingTransactions() staking.StakingTransactions {
 // IncomingReceipts returns verified outgoing receipts
 func (b *Block) IncomingReceipts() CXReceiptsProofs {
 	return b.incomingReceipts
+}
+
+// IncomingDeploys returns incoming deploy proofs
+func (b *Block) IncomingDeploys() CXDeployProofs {
+	return b.incomingDeploys
+}
+
+// OutgoingDeploys returns outgoing deploy intents
+func (b *Block) OutgoingDeploys() CXDeploys {
+	return b.outgoingDeploys
 }
 
 // Number returns header number.
@@ -535,6 +578,8 @@ func (b *Block) Body() *Body {
 		StakingTransactions(b.stakingTransactions).
 		Uncles(b.uncles).
 		IncomingReceipts(b.incomingReceipts).
+		IncomingDeploys(b.incomingDeploys).
+		OutgoingDeploys(b.outgoingDeploys).
 		Body()
 }
 

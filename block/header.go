@@ -127,6 +127,16 @@ func (h *Header) NumberU64() uint64 {
 	return h.Number().Uint64()
 }
 
+// IncomingDeployHash is the ingress deploy proof trie hash.
+func (h *Header) IncomingDeployHash() common.Hash {
+	return h.Header.IncomingDeployHash()
+}
+
+// SetIncomingDeployHash sets the ingress deploy proof trie hash.
+func (h *Header) SetIncomingDeployHash(newIncomingDeployHash common.Hash) {
+	h.Header.SetIncomingDeployHash(newIncomingDeployHash)
+}
+
 // Logger returns a sub-logger with block contexts added.
 func (h *Header) Logger(logger *zerolog.Logger) *zerolog.Logger {
 	nlogger := logger.With().

@@ -22,6 +22,7 @@ import (
 	"github.com/harmony-one/harmony/consensus"
 	"github.com/harmony-one/harmony/core"
 	"github.com/harmony-one/harmony/core/types"
+	"github.com/harmony-one/harmony/core/vm"
 	"github.com/harmony-one/harmony/crypto/bls"
 	harmonyconfig "github.com/harmony-one/harmony/internal/configs/harmony"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
@@ -133,6 +134,9 @@ type Node struct {
 	psCtx    context.Context
 	psCancel func()
 	registry *registry.Registry
+
+	// JOYUE Service 实例
+	JoyueService *JoyueService
 }
 
 // Blockchain returns the blockchain for the node's current shard.
@@ -192,6 +196,8 @@ func (node *Node) EpochChain() core.BlockChain {
 }
 
 // TODO: make this batch more transactions
+// 在P2P网络中进行gossip的实现
+// 将这笔交易打包成消息，精准地广播给属于同一分片（Shard Group）的其他节点。
 func (node *Node) tryBroadcast(tx *types.Transaction) {
 	msg := proto_node.ConstructTransactionListMessageAccount(types.Transactions{tx})
 
@@ -199,9 +205,25 @@ func (node *Node) tryBroadcast(tx *types.Transaction) {
 	utils.Logger().Info().Str("shardGroupID", string(shardGroupID)).Msg("tryBroadcast")
 
 	for attempt := 0; attempt < NumTryBroadCast; attempt++ {
+		//多播给整个shardGroup群组
 		err := node.host.SendMessageToGroups([]nodeconfig.GroupID{shardGroupID}, p2p.ConstructMessage(msg))
 		if err != nil {
 			utils.Logger().Error().Int("attempt", attempt).Msg("Error when trying to broadcast tx")
+		} else {
+			break
+		}
+	}
+}
+
+// tryBroadcastJoyueDeploy broadcasts JoyueDeployTx to the tx's shard topic.
+func (node *Node) tryBroadcastJoyueDeploy(tx *types.JoyueDeployTx) {
+	msg := proto_node.ConstructJoyueDeployTxListMessage([]*types.JoyueDeployTx{tx})
+	shardGroupID := nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(tx.ShardID()))
+	utils.Logger().Info().Str("shardGroupID", string(shardGroupID)).Msg("tryBroadcastJoyueDeploy")
+	for attempt := 0; attempt < NumTryBroadCast; attempt++ {
+		err := node.host.SendMessageToGroups([]nodeconfig.GroupID{shardGroupID}, p2p.ConstructMessage(msg))
+		if err != nil {
+			utils.Logger().Error().Int("attempt", attempt).Msg("Error when trying to broadcast JoyueDeployTx")
 		} else {
 			break
 		}
@@ -229,40 +251,54 @@ func (node *Node) tryBroadcastStaking(stakingTx *staking.StakingTransaction) {
 // Add new transactions to the pending transaction list.
 func addPendingTransactions(registry *registry.Registry, newTxs types.Transactions) []error {
 	var (
-		errs          []error
-		bc            = registry.GetBlockchain()
-		txPool        = registry.GetTxPool()
-		poolTxs       = types.PoolTransactions{}
-		epoch         = bc.CurrentHeader().Epoch()
-		acceptCx      = bc.Config().AcceptsCrossTx(epoch)
+		errs    []error
+		bc      = registry.GetBlockchain()
+		txPool  = registry.GetTxPool()
+		poolTxs = types.PoolTransactions{}
+		epoch   = bc.CurrentHeader().Epoch()
+
+		//当前epoch是否允许跨分片
+		acceptCx = bc.Config().AcceptsCrossTx(epoch)
+
+		// 是否处于 HIP-30 升级的前夜？
 		isBeforeHIP30 = bc.Config().IsOneEpochBeforeHIP30(epoch)
-		nxtShards     = shard.Schedule.InstanceForEpoch(new(big.Int).Add(epoch, common.Big1)).NumShards()
+
+		// 下一个epoch还剩几个分片？
+		nxtShards = shard.Schedule.InstanceForEpoch(new(big.Int).Add(epoch, common.Big1)).NumShards()
 	)
 	for _, tx := range newTxs {
 		if tx.ShardID() != tx.ToShardID() {
 			if !acceptCx {
+				// 拒收：当前网络还未激活跨分片功能
 				errs = append(errs, errors.WithMessage(errInvalidEpoch, "cross-shard tx not accepted yet"))
 				continue
 			}
 			if isBeforeHIP30 {
 				if tx.ToShardID() >= nxtShards {
+					// 拒收：你发的那个分片马上就要消失了，别发了！
 					errs = append(errs, errors.New("shards 2 and 3 are shutting down in the next epoch"))
 					continue
 				}
 			}
 		}
 		if tx.IsEthCompatible() && !bc.Config().IsEthCompatible(bc.CurrentBlock().Epoch()) {
+			// 拒收：当前纪元还不支持这种 ETH 格式的交易
 			errs = append(errs, errors.WithMessage(errInvalidEpoch, "ethereum tx not accepted yet"))
 			continue
 		}
 		if isBeforeHIP30 {
 			if bc.ShardID() >= nxtShards {
+				// 拒收：我自己（当前节点所在的分片）马上就要被关闭了！
+				// 我不再接收任何新交易，准备“退休”。
 				errs = append(errs, errors.New("shards 2 and 3 are shutting down in the next epoch"))
 				continue
 			}
 		}
+		// 1. 将通过检查的交易加入临时列表
 		poolTxs = append(poolTxs, tx)
 	}
+
+	//批量提交给 TxPool，这里是放入内存池的操作
 	errs = append(errs, registry.GetTxPool().AddRemotes(poolTxs)...)
 	pendingCount, queueCount := txPool.Stats()
 	utils.Logger().Debug().
@@ -330,6 +366,7 @@ func (node *Node) AddPendingStakingTransaction(
 // AddPendingTransaction adds one new transaction to the pending transaction list.
 // This is only called from SDK.
 func (node *Node) AddPendingTransaction(newTx *types.Transaction) error {
+	//如果当前交易的shardID和本节点的shardID一致
 	if newTx.ShardID() == node.NodeConfig.ShardID {
 		errs := addPendingTransactions(node.registry, types.Transactions{newTx})
 		var err error
@@ -342,6 +379,8 @@ func (node *Node) AddPendingTransaction(newTx *types.Transaction) error {
 		}
 		if err == nil || node.BroadcastInvalidTx {
 			utils.Logger().Info().Str("Hash", newTx.Hash().Hex()).Str("HashByType", newTx.HashByType().Hex()).Msg("Broadcasting Tx")
+			// 对于 RPC 进来的单笔交易，通常希望体验最好（用户想立刻看到交易在浏览器上 pending），所以这里往往采用更直接的广播策略，减少排队等待。
+			// 注意如果err发生了是不会走到这里面来的
 			node.tryBroadcast(newTx)
 		}
 		return err
@@ -349,9 +388,37 @@ func (node *Node) AddPendingTransaction(newTx *types.Transaction) error {
 	return errors.Errorf("shard do not match, txShard: %d, nodeShard: %d", newTx.ShardID(), node.NodeConfig.ShardID)
 }
 
+// AddPendingPoolTransaction adds a pool transaction (extensible for new tx types).
+// This is used by higher-level APIs (e.g. RPC) to submit non-legacy tx types.
+func (node *Node) AddPendingPoolTransaction(newTx types.PoolTransaction) error {
+	switch tx := newTx.(type) {
+	case *types.Transaction:
+		return node.AddPendingTransaction(tx)
+	case *types.JoyueDeployTx:
+		// Joyue deploy tx is only valid on the tx's shard (source shard).
+		if tx.ShardID() != node.NodeConfig.ShardID {
+			return errors.Errorf("shard do not match, txShard: %d, nodeShard: %d", tx.ShardID(), node.NodeConfig.ShardID)
+		}
+		err := node.TxPool.AddRemote(tx)
+		if err == nil || node.BroadcastInvalidTx {
+			utils.Logger().Info().Str("Hash", tx.Hash().Hex()).Msg("Broadcasting JoyueDeployTx")
+			node.tryBroadcastJoyueDeploy(tx)
+		}
+		return err
+	default:
+		return types.ErrUnknownPoolTxType
+	}
+}
+
 // AddPendingReceipts adds one receipt message to pending list.
 func (node *Node) AddPendingReceipts(receipts *types.CXReceiptsProof) {
 	node.Consensus.AddPendingReceipts(receipts)
+}
+
+// AddPendingDeploys adds one deploy proof message to pending list.
+func (node *Node) AddPendingDeploys(proof *types.CXDeployProof) {
+	// TODO: integrate queue; for now, delegate to consensus (to be implemented)
+	node.Consensus.AddPendingDeploys(proof)
 }
 
 type withError struct {
@@ -610,10 +677,12 @@ var (
 )
 
 // StartPubSub kicks off the node message handling
+// 建立网络监听，订阅特定的频道（Topic），并构建一条高效的流水线，负责接收、验证、分流和处理来自全网的广播消息。
 func (node *Node) StartPubSub() error {
 	node.psCtx, node.psCancel = context.WithCancel(context.Background())
 
 	// groupID and whether this topic is used for consensus
+	// 定义临时结构体 t，用于存储 Topic ID 和它是否用于共识
 	type t struct {
 		tp    nodeconfig.GroupID
 		isCon bool
@@ -621,8 +690,11 @@ func (node *Node) StartPubSub() error {
 	groups := map[nodeconfig.GroupID]bool{}
 
 	// three topic subscribed by each validator
+	// 循环添加当前节点需要加入的群组
 	for _, t := range []t{
+		// 1. 分片群 (VIP): 用于共识消息 (isCon=true)
 		{node.NodeConfig.GetShardGroupID(), true},
+		// 2. 客户端群 (普通): 用于广播交易/区块 (isCon=false)
 		{node.NodeConfig.GetClientGroupID(), false},
 	} {
 		if _, ok := groups[t.tp]; !ok {
@@ -630,6 +702,7 @@ func (node *Node) StartPubSub() error {
 		}
 	}
 
+	// 实际连接 P2P 网络 (Join)
 	type u struct {
 		p2p.NamedTopic
 		consensusBound bool
@@ -644,10 +717,13 @@ func (node *Node) StartPubSub() error {
 
 	if !node.NodeConfig.IsOffline {
 		for key, isCon := range groups {
+			// host.GetOrJoin: 调用 libp2p 库，真正加入这个 P2P 话题
 			topicHandle, err := node.host.GetOrJoin(string(key))
 			if err != nil {
 				return err
 			}
+
+			// 把连接好的 topic 存起来
 			allTopics = append(
 				allTopics, u{
 					NamedTopic:     p2p.NamedTopic{Name: string(key), Topic: topicHandle},
@@ -657,7 +733,10 @@ func (node *Node) StartPubSub() error {
 		}
 	}
 	pubsub := node.host.PubSub()
+
+	// 自己的身份证号，后面用来防止处理自己发的消息
 	ownID := node.host.GetID()
+	// 用于收集异步线程的报错
 	errChan := make(chan withError, 100)
 
 	// p2p consensus message handler function
@@ -691,6 +770,7 @@ func (node *Node) StartPubSub() error {
 	nodeStringCounterVec.WithLabelValues("peerid", nodeconfig.GetPeerID().String()).Inc()
 
 	for i := range allTopics {
+		// 真正订阅，开始接收数据流
 		sub, err := allTopics[i].Topic.Subscribe()
 		if err != nil {
 			return err
@@ -704,6 +784,7 @@ func (node *Node) StartPubSub() error {
 			Msg("enabled topic validation pubsub messages")
 
 		// register topic validator for each topic
+		// 我们告诉 P2P 库："嘿，在这个话题下，每收到一条消息，先跑这个匿名函数检查一下！"
 		if err := pubsub.RegisterTopicValidator(
 			topicNamed,
 			// this is the validation function called to quickly validate every p2p message
@@ -718,9 +799,11 @@ func (node *Node) StartPubSub() error {
 					return libp2p_pubsub.ValidationReject
 				}
 
+				// 去掉前缀，拿出正文
 				openBox := hmyMsg[p2pMsgPrefixSize:]
 
 				// validate message category
+				// 分类检查：是共识消息 (Consensus) 还是普通消息 (Node)？
 				switch proto.MessageCategory(openBox[proto.MessageCategoryBytes-1]) {
 				case proto.Consensus:
 					// received consensus message in non-consensus bound topic
@@ -751,7 +834,7 @@ func (node *Node) StartPubSub() error {
 					msg.ValidatorData = validated{
 						peerID:         peer,
 						consensusBound: true,
-						handleC:        node.Consensus.HandleMessageUpdate,
+						handleC:        node.Consensus.HandleMessageUpdate, // 指定处理函数：共识处理器
 						handleCArg:     validMsg,
 						senderPubKey:   senderPubKey,
 					}
@@ -782,7 +865,7 @@ func (node *Node) StartPubSub() error {
 					msg.ValidatorData = validated{
 						peerID:         peer,
 						consensusBound: false,
-						handleE:        node.HandleNodeMessage,
+						handleE:        node.HandleNodeMessage, // 指定处理函数：普通消息处理器
 						handleEArg:     validMsg,
 						actionType:     actionType,
 					}
@@ -807,9 +890,13 @@ func (node *Node) StartPubSub() error {
 		}
 
 		semConsensus := semaphore.NewWeighted(p2p.SetAsideForConsensus)
+
+		//类似一个共识消息的缓冲队列，等待对应的线程来消费
 		msgChanConsensus := make(chan validated, MsgChanBuffer)
 
 		// goroutine to handle consensus messages
+		// 启动一个后台线程 (Goroutine)
+		//监听 msgChanConsensus 中的消息，并处理
 		go func() {
 			for {
 				select {
@@ -855,10 +942,14 @@ func (node *Node) StartPubSub() error {
 			}
 		}()
 
+		//许可证中心保证同时处理的线程不超过p2p.SetAsideOtherwise这个多个
 		semNode := semaphore.NewWeighted(p2p.SetAsideOtherwise)
+
+		//类似一个node消息的缓冲队列，等待对应的线程来消费 channel 通道
 		msgChanNode := make(chan validated, MsgChanBuffer)
 
 		// goroutine to handle node messages
+		//监听 msgChanNode 中的消息，并处理
 		go func() {
 			for {
 				select {
@@ -893,6 +984,7 @@ func (node *Node) StartPubSub() error {
 			}
 		}()
 
+		//分发通过安检的包裹，然后看标签分发给对应的channel，共识或者是普通
 		go func() {
 			for {
 				nextMsg, err := sub.Next(node.psCtx)
@@ -970,6 +1062,22 @@ func New(
 		crosslinks:           crosslinks.New(),
 		syncID:               GenerateSyncID(),
 	}
+
+	// === JOYUE 初始化开始 ===
+	// 1. 创建 Service 实例
+	node.JoyueService = NewJoyueService()
+
+	// 2. 注入到 core/vm 包的全局变量中
+	// 这样 EVM 运行时就能通过 vm.GlobalShadowReader 访问到 node.JoyueService
+	vm.SetGlobalShadowReader(node.JoyueService)
+
+	// 3. (可选) 预置一些测试数据，方便您验证
+	// 模拟: Shard 1, 地址 0xAA...AA, Key 0x01...01 => Value "Hello Joyue"
+	dummyAddr := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	dummyKey := common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000001").Bytes()
+	node.JoyueService.SetShadowState(1, dummyAddr, dummyKey, []byte("Hello Joyue"))
+	// === JOYUE 初始化结束 ===
+
 	if consensusObj == nil {
 		panic("consensusObj is nil")
 	}

@@ -52,6 +52,7 @@ func (node *Node) processSkippedMsgTypeByteValue(
 }
 
 // HandleNodeMessage parses the message and dispatch the actions.
+// 普通节点消息分发中心
 func (node *Node) HandleNodeMessage(
 	ctx context.Context,
 	msgPayload []byte,
@@ -114,6 +115,31 @@ func (node *Node) transactionMessageHandler(msgPayload []byte) {
 			return
 		}
 		addPendingTransactions(node.registry, txs)
+	case proto_node.SendJoyueDeployTx:
+		txs := []*types.JoyueDeployTx{}
+		err := rlp.Decode(bytes.NewReader(msgPayload[1:]), &txs) // skip subtype
+		if err != nil {
+			utils.Logger().Error().Err(err).Msg("Failed to deserialize JoyueDeployTx list")
+			return
+		}
+		// Add to txpool as remote transactions (no re-broadcast here).
+		poolTxs := types.PoolTransactions{}
+		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
+			if err := tx.ValidateSignature(); err != nil {
+				utils.Logger().Warn().Err(err).Msg("JoyueDeployTx invalid signature (dropped)")
+				continue
+			}
+			poolTxs = append(poolTxs, tx)
+		}
+		errs := node.registry.GetTxPool().AddRemotes(poolTxs)
+		for i := range errs {
+			if errs[i] != nil {
+				utils.Logger().Debug().Err(errs[i]).Msg("JoyueDeployTx rejected by txpool")
+			}
+		}
 	}
 }
 

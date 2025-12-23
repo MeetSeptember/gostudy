@@ -26,6 +26,7 @@ func (consensus *Consensus) postConsensusProcessing(newBlock *types.Block) error
 			BroadcastNewBlock(consensus.host, newBlock, consensus.registry.GetNodeConfig())
 		}
 		BroadcastCXReceipts(newBlock, consensus)
+		BroadcastCXDeploys(newBlock, consensus)
 	} else {
 		if mode := consensus.mode(); mode != Listening {
 			numSignatures := consensus.NumSignaturesIncludedInBlock(newBlock)
@@ -55,6 +56,7 @@ func (consensus *Consensus) postConsensusProcessing(newBlock *types.Block) error
 					BroadcastNewBlock(consensus.host, newBlock, consensus.registry.GetNodeConfig())
 				}
 				BroadcastCXReceipts(newBlock, consensus)
+				BroadcastCXDeploys(newBlock, consensus)
 			}
 		}
 	}
@@ -127,13 +129,21 @@ func IsRunningBeaconChain(c *Consensus) bool {
 // BroadcastCXReceipts broadcasts cross shard receipts to correspoding
 // destination shards
 func BroadcastCXReceipts(newBlock *types.Block, consensus *Consensus) {
+	// 获取当前区块的共识签名数据 (签名 + 位图)
 	commitSigAndBitmap := newBlock.GetCurrentCommitSig()
 	//#### Read payload data from committed msg
+	// 长度检查：BLS 签名固定 96 字节。
+	// 如果总长度 <= 96，说明没有位图或者数据损坏，直接返回，不广播了。
 	if len(commitSigAndBitmap) <= 96 {
 		utils.Logger().Debug().Int("commitSigAndBitmapLen", len(commitSigAndBitmap)).Msg("[BroadcastCXReceipts] commitSigAndBitmap Not Enough Length")
 		return
 	}
+	// 拆分数据
+	// 前 96 字节是 BLS 聚合签名 (commitSig)
 	commitSig := make([]byte, 96)
+
+	// 剩下的部分是位图 (commitBitmap)
+	// 位图用来记录是哪几个验证者参与了签名 (例如：第 1, 3, 5 号验证者签了)。
 	commitBitmap := make([]byte, len(commitSigAndBitmap)-96)
 	offset := 0
 	copy(commitSig[:], commitSigAndBitmap[offset:offset+96])
@@ -142,8 +152,11 @@ func BroadcastCXReceipts(newBlock *types.Block, consensus *Consensus) {
 	//#### END Read payload data from committed msg
 
 	epoch := newBlock.Header().Epoch()
+
+	// 根据纪元获取分片配置 (因为分片数量可能会变)
 	shardingConfig := shard.Schedule.InstanceForEpoch(epoch)
 	shardNum := int(shardingConfig.NumShards())
+
 	myShardID := consensus.ShardID
 	utils.Logger().Info().Int("shardNum", shardNum).Uint32("myShardID", myShardID).Uint64("blockNum", newBlock.NumberU64()).Msg("[BroadcastCXReceipts]")
 
@@ -151,8 +164,76 @@ func BroadcastCXReceipts(newBlock *types.Block, consensus *Consensus) {
 		if i == int(myShardID) {
 			continue
 		}
+		// 调用具体函数进行广播
+		// 参数含义：
+		// - newBlock.Header(): 区块头 (包含 Merkle Root，用于验证收据存在性)
+		// - commitSig/Bitmap: 共识签名 (证明这个区块头是合法的)
+		// - uint32(i): 目标分片 ID (我要发给谁)
 		BroadcastCXReceiptsWithShardID(newBlock.Header(), commitSig, commitBitmap, uint32(i), consensus)
 	}
+}
+
+// BroadcastCXDeploys broadcasts cross shard deploy proofs to corresponding destination shards.
+func BroadcastCXDeploys(newBlock *types.Block, consensus *Consensus) {
+	commitSigAndBitmap := newBlock.GetCurrentCommitSig()
+	if len(commitSigAndBitmap) <= 96 {
+		utils.Logger().Debug().Int("commitSigAndBitmapLen", len(commitSigAndBitmap)).Msg("[BroadcastCXDeploys] commitSigAndBitmap Not Enough Length")
+		return
+	}
+	commitSig := make([]byte, 96)
+	commitBitmap := make([]byte, len(commitSigAndBitmap)-96)
+	offset := 0
+	copy(commitSig[:], commitSigAndBitmap[offset:offset+96])
+	offset += 96
+	copy(commitBitmap[:], commitSigAndBitmap[offset:])
+
+	epoch := newBlock.Header().Epoch()
+	shardingConfig := shard.Schedule.InstanceForEpoch(epoch)
+	shardNum := int(shardingConfig.NumShards())
+	myShardID := consensus.ShardID
+
+	for i := 0; i < shardNum; i++ {
+		if i == int(myShardID) {
+			continue
+		}
+		BroadcastCXDeploysWithShardID(newBlock.Header(), commitSig, commitBitmap, uint32(i), consensus)
+	}
+}
+
+// BroadcastCXDeploysWithShardID broadcasts deploy intents to a given destination shard.
+// TODO: add merkle proof; currently sends deploys + header + commit sig/bitmap.
+func BroadcastCXDeploysWithShardID(block *block.Header, commitSig []byte, commitBitmap []byte, toShardID uint32, consensus *Consensus) {
+	myShardID := consensus.ShardID
+	utils.Logger().Debug().
+		Uint32("toShardID", toShardID).
+		Uint32("myShardID", myShardID).
+		Uint64("blockNum", block.NumberU64()).
+		Msg("[BroadcastCXDeploysWithShardID]")
+
+	deploys, err := consensus.Blockchain().ReadCXDeploys(toShardID, block.NumberU64(), block.Hash())
+	if err != nil || len(deploys) == 0 {
+		utils.Logger().Debug().Uint32("ToShardID", toShardID).
+			Int("numCXDeploys", len(deploys)).
+			Msg("[CXDeployProof] No deploys found for the destination shard")
+		return
+	}
+
+	cxDeployProof := &types.CXDeployProof{
+		Deploys:      deploys,
+		Header:       block,
+		CommitSig:    commitSig,
+		CommitBitmap: commitBitmap,
+	}
+
+	groupID := nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(toShardID))
+	utils.Logger().Info().Uint32("ToShardID", toShardID).
+		Str("GroupID", string(groupID)).
+		Int("numDeploys", len(deploys)).
+		Msg("[BroadcastCXDeploysWithShardID] Ready. Sending deploy proofs...")
+
+	consensus.GetHost().SendMessageToGroups([]nodeconfig.GroupID{groupID},
+		p2p.ConstructMessage(proto_node.ConstructCXDeployProof(cxDeployProof)),
+	)
 }
 
 // BroadcastCXReceiptsWithShardID broadcasts cross shard receipts to given ToShardID

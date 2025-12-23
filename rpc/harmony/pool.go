@@ -80,6 +80,28 @@ func (s *PublicPoolService) SendRawTransaction(
 		return common.Hash{}, err
 	}
 
+	// JoyueDeployTx (typed tx): 0x7a || rlp(payload)
+	if len(encodedTx) > 0 && encodedTx[0] == types.JoyueDeployTxType {
+		jtx := new(types.JoyueDeployTx)
+		if err := rlp.DecodeBytes(encodedTx[1:], jtx); err != nil {
+			return common.Hash{}, err
+		}
+		if err := jtx.ValidateSignature(); err != nil {
+			return common.Hash{}, err
+		}
+		// Verify chainID
+		if err := s.verifyChainIDInternal(jtx); err != nil {
+			return common.Hash{}, err
+		}
+		// Submit transaction
+		if err := s.hmy.SendPoolTx(ctx, jtx); err != nil {
+			utils.Logger().Warn().Err(err).Msg("Could not submit joyue deploy transaction")
+			return common.Hash{}, err
+		}
+		utils.Logger().Info().Str("hash", jtx.Hash().Hex()).Msg("Submitted JoyueDeployTx")
+		return jtx.Hash(), nil
+	}
+
 	var tx *types.Transaction
 	var txHash common.Hash
 
@@ -89,6 +111,8 @@ func (s *PublicPoolService) SendRawTransaction(
 			return common.Hash{}, err
 		}
 		txHash = ethTx.Hash()
+
+		//关键点：将 ETH 交易转换为 Harmony 内部交易格式，主要区别是添加上了shardID和toShardID
 		tx = ethTx.ConvertToHmy()
 	} else {
 		tx = new(types.Transaction)
@@ -99,6 +123,7 @@ func (s *PublicPoolService) SendRawTransaction(
 	}
 
 	// Verify chainID
+	// 防止重放攻击，例如将在测试网中的交易放到主网上执行
 	if err := s.verifyChainID(tx); err != nil {
 		return common.Hash{}, err
 	}
@@ -140,6 +165,17 @@ func (s *PublicPoolService) SendRawTransaction(
 	return txHash, nil
 }
 
+func (s *PublicPoolService) verifyChainIDInternal(tx types.InternalTransaction) error {
+	nodeChainID := s.hmy.ChainConfig().ChainID
+	ethChainID := nodeconfig.GetDefaultConfig().GetNetworkType().ChainConfig().EthCompatibleChainID
+
+	if tx.ChainID().Cmp(ethChainID) != 0 && tx.ChainID().Cmp(nodeChainID) != 0 {
+		return errors.Wrapf(
+			ErrInvalidChainID, "blockchain chain id:%s, given %s", nodeChainID.String(), tx.ChainID().String(),
+		)
+	}
+	return nil
+}
 func (s *PublicPoolService) verifyChainID(tx *types.Transaction) error {
 	nodeChainID := s.hmy.ChainConfig().ChainID
 	ethChainID := nodeconfig.GetDefaultConfig().GetNetworkType().ChainConfig().EthCompatibleChainID

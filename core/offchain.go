@@ -50,7 +50,11 @@ func (bc *BlockChainImpl) CommitOffChainData(
 				continue
 			}
 
+			// 挑出“发往分片 i”的收据
 			shardReceipts := types.CXReceipts(cxReceipts).GetToShardReceipts(uint32(i))
+
+			// 分类写入数据库
+			// 这样以后查询 "有哪些是发给 Shard 2 的跨片收据？" 时，可以快速查到。
 			if err := rawdb.WriteCXReceipts(
 				batch, uint32(i), block.NumberU64(), block.Hash(), shardReceipts,
 			); err != nil {
@@ -62,8 +66,47 @@ func (bc *BlockChainImpl) CommitOffChainData(
 			}
 		}
 		// Mark incomingReceipts in the block as spent
+		// 标记已消费的收据 (Spent Proof)
+		// 既然我处理了别人发给我的收据，我就要在数据库里打个勾，防止双重花费。
 		if err := bc.WriteCXReceiptsProofSpent(batch, block.IncomingReceipts()); err != nil {
 			return NonStatTy, err
+		}
+	}
+
+	// Cross-shard deploy proofs: mark incoming deploy proofs as spent
+	if len(block.IncomingDeploys()) > 0 {
+		if err := bc.WriteCXDeployProofSpent(batch, block.IncomingDeploys()); err != nil {
+			return NonStatTy, err
+		}
+	}
+
+	// Cross-shard deploy intents (source shard): store deploys per destination shard
+	if bc.chainConfig.HasCrossTxFields(block.Epoch()) {
+		shardingConfig := shard.Schedule.InstanceForEpoch(epoch)
+		shardNum := int(shardingConfig.NumShards())
+		for i := 0; i < shardNum; i++ {
+			if i == int(block.ShardID()) {
+				continue
+			}
+			// gather deploys for to-shard
+			var shardDeploys types.CXDeploys
+			for _, d := range block.OutgoingDeploys() {
+				if d.ToShardID == uint32(i) {
+					shardDeploys = append(shardDeploys, d.Copy())
+				}
+			}
+			if len(shardDeploys) == 0 {
+				continue
+			}
+			if err := rawdb.WriteCXDeploys(
+				batch, uint32(i), block.NumberU64(), block.Hash(), shardDeploys,
+			); err != nil {
+				utils.Logger().Error().Err(err).
+					Interface("shardDeploys", shardDeploys).
+					Int("toShardID", i).
+					Msg("WriteCXDeploys cannot write into database")
+				return NonStatTy, err
+			}
 		}
 	}
 

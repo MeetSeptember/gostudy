@@ -107,6 +107,8 @@ var (
 	// TODO: shorten the key prefix so we don't waste db space
 	cxReceiptPrefix         = []byte("cxReceipt")          // prefix for cross shard transaction receipt
 	cxReceiptSpentPrefix    = []byte("cxReceiptSpent")     // prefix for indicator of unspent of cxReceiptsProof
+	cxDeployPrefix          = []byte("cxDeploy")           // prefix for cross shard deploy intents
+	cxDeploySpentPrefix     = []byte("cxDeploySpent")      // prefix for indicator of unspent deploy proofs
 	validatorSnapshotPrefix = []byte("validator-snapshot") // prefix for staking validator's snapshot information
 	validatorStatsPrefix    = []byte("validator-stats")    // prefix for staking validator's stats information
 	validatorListKey        = []byte("validator-list")     // key for all validators list
@@ -363,6 +365,25 @@ func cxReceiptKey(shardID uint32, number uint64, hash common.Hash) []byte {
 // cxReceiptSpentKey = cxReceiptsSpentPrefix + shardID + num (uint64 big endian)
 func cxReceiptSpentKey(shardID uint32, number uint64) []byte {
 	prefix := cxReceiptSpentPrefix
+	sKey := make([]byte, 4)
+	binary.BigEndian.PutUint32(sKey, shardID)
+	tmp := append(prefix, sKey...)
+	return append(tmp, encodeBlockNumber(number)...)
+}
+
+// cxDeployKey = cxDeployPrefix + shardID + num (uint64 big endian) + hash
+func cxDeployKey(shardID uint32, number uint64, hash common.Hash) []byte {
+	prefix := cxDeployPrefix
+	sKey := make([]byte, 4)
+	binary.BigEndian.PutUint32(sKey, shardID)
+	tmp := append(prefix, sKey...)
+	tmp1 := append(tmp, encodeBlockNumber(number)...)
+	return append(tmp1, hash.Bytes()...)
+}
+
+// cxDeploySpentKey = cxDeploySpentPrefix + shardID + num (uint64 big endian)
+func cxDeploySpentKey(shardID uint32, number uint64) []byte {
+	prefix := cxDeploySpentPrefix
 	sKey := make([]byte, 4)
 	binary.BigEndian.PutUint32(sKey, shardID)
 	tmp := append(prefix, sKey...)

@@ -35,6 +35,10 @@ type TransactionMessageType int
 const (
 	Send TransactionMessageType = iota
 	Unlock
+	// SendJoyueDeployTx broadcasts JoyueDeployTx list (typed tx) over node/transaction channel.
+	SendJoyueDeployTx
+	// SendCXDeployProof broadcasts CXDeployProof list
+	SendCXDeployProof
 )
 
 // BlockMessageType represents the type of messages used for Node/Block
@@ -66,10 +70,12 @@ var (
 	// H suffix means header
 	slashH              = []byte{nodeB, blockB, slashB}
 	transactionListH    = []byte{nodeB, txnB, sendB}
+	joyueDeployTxListH  = []byte{nodeB, txnB, byte(SendJoyueDeployTx)}
 	stakingTxnListH     = []byte{nodeB, stakingB, sendB}
 	syncH               = []byte{nodeB, blockB, syncB}
 	crossLinkH          = []byte{nodeB, blockB, crossLinkB}
 	cxReceiptH          = []byte{nodeB, blockB, receiptB}
+	cxDeployH           = []byte{nodeB, blockB, byte(SendCXDeployProof)}
 	crossLinkHeartBeatH = []byte{nodeB, blockB, crossLinkHeardBeatB}
 	epochBlockH         = []byte{nodeB, blockB, epochB}
 )
@@ -83,6 +89,18 @@ func ConstructTransactionListMessageAccount(transactions types.Transactions) []b
 		return []byte{} // TODO(RJ): better handle of the error
 	}
 	byteBuffer.Write(txs)
+	return byteBuffer.Bytes()
+}
+
+// ConstructJoyueDeployTxListMessage constructs serialized JoyueDeployTx list.
+func ConstructJoyueDeployTxListMessage(txs []*types.JoyueDeployTx) []byte {
+	byteBuffer := bytes.NewBuffer(joyueDeployTxListH)
+	by, err := rlp.EncodeToBytes(txs)
+	if err != nil {
+		log.Fatal(err)
+		return []byte{}
+	}
+	byteBuffer.Write(by)
 	return byteBuffer.Bytes()
 }
 
@@ -156,6 +174,19 @@ func ConstructCXReceiptsProof(cxReceiptsProof *types.CXReceiptsProof) []byte {
 	by, err := rlp.EncodeToBytes(cxReceiptsProof)
 	if err != nil {
 		const msg = "[ConstructCXReceiptsProof] Encode CXReceiptsProof Error"
+		utils.Logger().Error().Err(err).Msg(msg)
+		return []byte{}
+	}
+	byteBuffer.Write(by)
+	return byteBuffer.Bytes()
+}
+
+// ConstructCXDeployProof constructs cross shard deploy proof (no merkle yet).
+func ConstructCXDeployProof(cxDeployProof *types.CXDeployProof) []byte {
+	byteBuffer := bytes.NewBuffer(cxDeployH)
+	by, err := rlp.EncodeToBytes(cxDeployProof)
+	if err != nil {
+		const msg = "[ConstructCXDeployProof] Encode CXDeployProof Error"
 		utils.Logger().Error().Err(err).Msg(msg)
 		return []byte{}
 	}

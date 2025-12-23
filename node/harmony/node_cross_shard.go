@@ -19,3 +19,17 @@ func (node *Node) ProcessReceiptMessage(msgPayload []byte) {
 	// TODO: integrate with txpool
 	node.AddPendingReceipts(&cxp)
 }
+
+// ProcessDeployMessage stores deploy proof into pending list
+func (node *Node) ProcessDeployMessage(msgPayload []byte) {
+	cxp := types.CXDeployProof{}
+	if err := rlp.DecodeBytes(msgPayload, &cxp); err != nil {
+		utils.Logger().Error().Err(err).
+			Msg("[ProcessDeployMessage] Unable to Decode message Payload")
+		return
+	}
+	utils.Logger().Debug().Interface("cxDeploy", cxp).
+		Msg("[ProcessDeployMessage] Add CXDeployProof to pending Deploys")
+	// TODO: integrate with txpool
+	node.AddPendingDeploys(&cxp)
+}

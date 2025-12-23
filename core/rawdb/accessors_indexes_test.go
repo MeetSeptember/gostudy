@@ -57,7 +57,7 @@ func TestLookupStorage(t *testing.T) {
 		&types.Receipt{},
 	}
 
-	block := types.NewBlock(blockfactory.NewTestHeader().With().Number(big.NewInt(314)).Header(), txs, receipts, nil, nil, stxs)
+	block := types.NewBlock(blockfactory.NewTestHeader().With().Number(big.NewInt(314)).Header(), types.BlockTransactionsFromLegacy(txs), receipts, nil, nil, stxs)
 
 	// Check that no transactions entries are in a pristine database
 	for i, tx := range txs {
@@ -128,7 +128,7 @@ func TestMixedLookupStorage(t *testing.T) {
 	txs := []*types.Transaction{tx}
 	stxs := []*staking.StakingTransaction{stx}
 	header := blockfactory.NewTestHeader().With().Number(big.NewInt(314)).Header()
-	block := types.NewBlock(header, txs, types.Receipts{&types.Receipt{}, &types.Receipt{}}, nil, nil, stxs)
+	block := types.NewBlock(header, types.BlockTransactionsFromLegacy(txs), types.Receipts{&types.Receipt{}, &types.Receipt{}}, nil, nil, stxs)
 
 	if err := WriteBlock(db, block); err != nil {
 		t.Fatalf("WriteBlock: %v", err)

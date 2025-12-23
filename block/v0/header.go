@@ -47,13 +47,15 @@ type headerFields struct {
 	Root        common.Hash    `json:"stateRoot"        gencodec:"required"`
 	TxHash      common.Hash    `json:"transactionsRoot" gencodec:"required"`
 	ReceiptHash common.Hash    `json:"receiptsRoot"     gencodec:"required"`
-	Bloom       ethtypes.Bloom `json:"logsBloom"        gencodec:"required"`
-	Number      *big.Int       `json:"number"           gencodec:"required"`
-	GasLimit    uint64         `json:"gasLimit"         gencodec:"required"`
-	GasUsed     uint64         `json:"gasUsed"          gencodec:"required"`
-	Time        *big.Int       `json:"timestamp"        gencodec:"required"`
-	Extra       []byte         `json:"extraData"        gencodec:"required"`
-	MixDigest   common.Hash    `json:"mixHash"          gencodec:"required"`
+	// v0 does not support CX receipts/deploys; keep fields for interface compatibility.
+	IncomingDeployHash common.Hash    `json:"incomingDeploysRoot"`
+	Bloom              ethtypes.Bloom `json:"logsBloom"        gencodec:"required"`
+	Number             *big.Int       `json:"number"           gencodec:"required"`
+	GasLimit           uint64         `json:"gasLimit"         gencodec:"required"`
+	GasUsed            uint64         `json:"gasUsed"          gencodec:"required"`
+	Time               *big.Int       `json:"timestamp"        gencodec:"required"`
+	Extra              []byte         `json:"extraData"        gencodec:"required"`
+	MixDigest          common.Hash    `json:"mixHash"          gencodec:"required"`
 	// Additional Fields
 	ViewID              *big.Int    `json:"viewID"           gencodec:"required"`
 	Epoch               *big.Int    `json:"epoch"            gencodec:"required"`
@@ -141,6 +143,20 @@ func (h *Header) SetIncomingReceiptHash(newIncomingReceiptHash common.Hash) {
 		h.Logger(utils.Logger()).Warn().
 			Hex("incomingReceiptHash", newIncomingReceiptHash[:]).
 			Msg("cannot store incoming receipt root hash in v0 header")
+	}
+}
+
+// IncomingDeployHash is the ingress deploy proof trie hash (unsupported in v0).
+func (h *Header) IncomingDeployHash() common.Hash {
+	return ethtypes.EmptyRootHash
+}
+
+// SetIncomingDeployHash sets the ingress deploy proof trie hash (warn in v0).
+func (h *Header) SetIncomingDeployHash(newIncomingDeployHash common.Hash) {
+	if newIncomingDeployHash != ethtypes.EmptyRootHash {
+		h.Logger(utils.Logger()).Warn().
+			Hex("incomingDeployHash", newIncomingDeployHash[:]).
+			Msg("cannot store incoming deploy root hash in v0 header")
 	}
 }
 

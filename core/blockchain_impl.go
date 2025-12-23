@@ -1520,11 +1520,17 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 	if currentBlock == nil {
 		return NonStatTy, errors.New("Current block is nil")
 	}
+
+	// 连贯性检查：
+	// 我要写入的这个 block，它的父亲必须是当前链的头块 (CurrentBlock)。
+	// 这保证了我们是在延长主链，而不是在写什么奇怪的孤块。
 	if block.ParentHash() != currentBlock.Hash() {
 		return NonStatTy, errors.Errorf("Hash of parent block %s doesn't match the current block hash %s", currentBlock.Hash().Hex(), block.ParentHash().Hex())
 	}
 
 	// Commit state object changes to in-memory trie
+	// 计算状态根 (Root Hash)。
+	// 这一步只是在内存里把 Trie 的哈希算出来，还没有写磁盘。
 	root, err := state.Commit(bc.chainConfig.IsS3(block.Epoch()))
 	if err != nil {
 		return NonStatTy, err
@@ -1533,6 +1539,9 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 	// Flush trie state into disk if it's archival node or the block is epoch block
 	triedb := bc.stateCache.TrieDB()
 	if bc.cacheConfig.Disabled || block.IsLastBlockInEpoch() {
+		// 强制写入磁盘！
+		// 归档节点需要保存所有历史状态。
+		// Epoch 块（换届选举块）非常重要，必须作为 Checkpoint 存下来。
 		if err := triedb.Commit(root, false); err != nil {
 			if isUnrecoverableErr(err) {
 				fmt.Printf("Unrecoverable error when committing triedb: %v\nExitting\n", err)
@@ -1564,6 +1573,10 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 				triedb.Cap(limit - ethdb.IdealBatchSize)
 			}
 			// Find the next state trie we need to commit
+			// 我们不存当前区块的状态，而是存 N 个区块之前的状态。
+			// 比如现在是 1000 块，我们把 800 块的状态写盘。
+			// 这样 801-1000 块的状态都在内存里，读写极快（为了性能）。
+			// 而 800 之前的状态被持久化了（为了安全）。
 			header := bc.GetHeaderByNumber(current - bc.cacheConfig.TriesInMemory)
 			if header != nil {
 				chosen := header.Number().Uint64()
@@ -1594,6 +1607,8 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 					if -number > bc.maxGarbCollectedBlkNum {
 						bc.maxGarbCollectedBlkNum = -number
 					}
+					// 对于那些太老的、已经写盘的状态，从内存引用中解除。
+					// LevelDB 的后台清理机制会把它们从磁盘上彻底抹去（如果没有其他引用的话）。
 					triedb.Dereference(root)
 				}
 			}
@@ -1602,11 +1617,14 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 
 	batch := bc.db.NewBatch()
 	// Write the raw block
+	// 1. 写区块本体 (Header + Body)
 	if err := rawdb.WriteBlock(batch, block); err != nil {
 		return NonStatTy, err
 	}
 
 	// Write offchain data
+	// 2. 写链下数据 (Receipts, CrossLinks, Staking Messages)
+	// 这些数据不在区块头里，但对于查询交易结果至关重要。
 	if status, err := bc.CommitOffChainData(
 		batch, block, receipts,
 		cxReceipts, stakeMsgs,
@@ -1616,6 +1634,8 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 	}
 
 	// Write the positional metadata for transaction/receipt lookups and preimages
+	// 3. 写索引 (Indices)
+	// 为了能通过 TxHash 查到它在哪一具区块，需要建立索引。
 	if err := rawdb.WriteBlockTxLookUpEntries(batch, block); err != nil {
 		return NonStatTy, err
 	}
@@ -1629,6 +1649,7 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 		return NonStatTy, err
 	}
 
+	// 如果开启了修剪功能，且区块够老，启动一个后台线程去修剪 Beacon Chain 的历史数据。
 	if bc.IsEnablePruneBeaconChainFeature() {
 		if block.Number().Cmp(big.NewInt(pruneBeaconChainBlockBefore)) > 0 && block.Epoch().Cmp(big.NewInt(pruneBeaconChainBeforeEpoch)) > 0 {
 			maxBlockNum := big.NewInt(0).Sub(block.Number(), big.NewInt(pruneBeaconChainBlockBefore)).Uint64()
@@ -1643,7 +1664,9 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 		}
 	}
 
+	// 这一步才是真正调用 LevelDB 的 Write 接口，把上面 batch 里的一堆东西一次性写进硬盘。
 	if err := batch.Write(); err != nil {
+		// 如果写硬盘失败（比如磁盘满了、坏道），这是不可恢复的错误，直接进程退出 (os.Exit)。
 		if isUnrecoverableErr(err) {
 			fmt.Printf("Unrecoverable error when writing leveldb: %v\nExitting\n", err)
 			os.Exit(1)
@@ -1652,6 +1675,9 @@ func (bc *BlockChainImpl) WriteBlockWithState(
 	}
 
 	// Update current block
+
+	// 告诉区块链："现在最新的块是这个了！"
+	// 这会更新 CurrentBlock 的指针，之后的 insertChain 就会基于这个新块继续。
 	if err := bc.writeHeadBlock(block); err != nil {
 		return NonStatTy, errors.Wrap(err, "writeHeadBlock")
 	}
@@ -1805,6 +1831,7 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 			// Competitor chain beat canonical, gather all blocks from the common ancestor
 			var winner []*types.Block
 
+			// 获取父区块
 			parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
 			for parent != nil && !bc.HasState(parent.Root()) {
 				winner = append(winner, parent)
@@ -1837,6 +1864,9 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 		} else {
 			parent = chain[i-1]
 		}
+
+		// 关键：基于父区块的状态根 (Root)，构建 StateDB
+		// 这就好比加载游戏存档："读取父区块那一刻的所有账户余额"。
 		state, err := state.New(parent.Root(), bc.stateCache, bc.snaps)
 		if err != nil {
 			return i, events, coalescedLogs, err
@@ -1856,6 +1886,8 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 			events = append(events, ev)
 		}
 		// Process block using the parent state as reference point.
+		// bc.processor.Process 内部会调用 ApplyTransaction
+		// 它会跑完区块里的所有交易，计算出新的状态 (newState)、收据 (receipts) 和日志 (logs)。
 		substart := time.Now()
 		receipts, cxReceipts, stakeMsgs, logs, usedGas, payout, newState, err := bc.processor.Process(
 			block, state, vmConfig, true,
@@ -1878,6 +1910,10 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 
 		// Validate the state using the default validator
 		substart = time.Now()
+
+		// 执行完后，必须检查："我算出来的结果，和矿工写在区块头里的结果一样吗？"
+		// 比如：状态根 (StateRoot)、收据根 (ReceiptRoot) 是否一致？
+		// 如果不一致，说明矿工造假，或者我的代码有 Bug，直接拒收该区块。
 		if err := bc.validator.ValidateState(
 			block, state, receipts, cxReceipts, usedGas,
 		); err != nil {
@@ -1893,6 +1929,8 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 
 		// Write the block to the chain and get the status.
 		substart = time.Now()
+
+		// 把区块数据、收据、最新的 Trie 节点写入 LevelDB/RocksDB。
 		status, err := bc.WriteBlockWithState(
 			block, receipts, cxReceipts, stakeMsgs, payout, state,
 		)
@@ -1921,10 +1959,13 @@ func (bc *BlockChainImpl) insertChain(chain types.Blocks, verifyHeaders bool) (i
 			logger.Info().Msgf("Inserted new block s: %d e: %d n:%d", block.ShardID(), block.Epoch().Uint64(), block.NumberU64())
 			coalescedLogs = append(coalescedLogs, logs...)
 			blockInsertTimer.UpdateSince(bstart)
+
+			// 生成事件，通知其他模块（比如钱包监听模块）
 			events = append(events, ChainEvent{block, block.Hash(), logs})
 			lastCanon = block
 
 			// used for tikv mode, writer node will publish update to all reader node
+			// 特殊逻辑：如果是 TiKV 模式（分布式数据库），广播分片更新消息
 			if bc.isInitTiKV() {
 				err = redis_helper.PublishShardUpdate(bc.ShardID(), block.NumberU64(), logs)
 				if err != nil {
@@ -2630,6 +2671,14 @@ func (bc *BlockChainImpl) ReadCXReceipts(shardID uint32, blockNum uint64, blockH
 	return cxs, nil
 }
 
+func (bc *BlockChainImpl) ReadCXDeploys(shardID uint32, blockNum uint64, blockHash common.Hash) (types.CXDeploys, error) {
+	cxs, err := rawdb.ReadCXDeploys(bc.db, shardID, blockNum, blockHash)
+	if err != nil || len(cxs) == 0 {
+		return nil, err
+	}
+	return cxs, nil
+}
+
 func (bc *BlockChainImpl) CXMerkleProof(toShardID uint32, block *block.Header) (*types.CXMerkleProof, error) {
 	proof := &types.CXMerkleProof{BlockNum: block.Number(), BlockHash: block.Hash(), ShardID: block.ShardID(), CXReceiptHash: block.OutgoingReceiptHash(), CXShardHashes: []common.Hash{}, ShardIDs: []uint32{}}
 
@@ -2662,10 +2711,31 @@ func (bc *BlockChainImpl) WriteCXReceiptsProofSpent(db rawdb.DatabaseWriter, cxp
 	return nil
 }
 
+func (bc *BlockChainImpl) WriteCXDeployProofSpent(db rawdb.DatabaseWriter, cxps []*types.CXDeployProof) error {
+	for _, cxp := range cxps {
+		shardID := cxp.Deploys[0].ToShardID
+		blockNum := cxp.Header.Number().Uint64()
+		if err := rawdb.WriteCXDeployProofSpent(db, shardID, blockNum); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (bc *BlockChainImpl) IsSpent(cxp *types.CXReceiptsProof) bool {
 	shardID := cxp.MerkleProof.ShardID
 	blockNum := cxp.MerkleProof.BlockNum.Uint64()
 	by, _ := rawdb.ReadCXReceiptsProofSpent(bc.db, shardID, blockNum)
+	return by == rawdb.SpentByte
+}
+
+func (bc *BlockChainImpl) IsDeploySpent(cxp *types.CXDeployProof) bool {
+	if cxp == nil || len(cxp.Deploys) == 0 {
+		return false
+	}
+	shardID := cxp.Deploys[0].ToShardID
+	blockNum := cxp.Header.Number().Uint64()
+	by, _ := rawdb.ReadCXDeployProofSpent(bc.db, shardID, blockNum)
 	return by == rawdb.SpentByte
 }
 

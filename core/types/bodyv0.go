@@ -16,7 +16,7 @@ type BodyV0 struct {
 }
 
 type bodyFieldsV0 struct {
-	Transactions []*Transaction
+	Transactions BlockTransactions
 	Uncles       []*block.Header
 }
 
@@ -24,20 +24,17 @@ type bodyFieldsV0 struct {
 //
 // The returned list is a deep copy; the caller may do anything with it without
 // affecting the original.
-func (b *BodyV0) Transactions() (txs []*Transaction) {
-	for _, tx := range b.f.Transactions {
-		txs = append(txs, tx.Copy())
-	}
-	return txs
+func (b *BodyV0) Transactions() BlockTransactions {
+	return b.f.Transactions.Copy()
 }
 
 // TransactionAt returns the transaction at the given index in this block.
 // It returns nil if index is out of bounds.
-func (b *BodyV0) TransactionAt(index int) *Transaction {
+func (b *BodyV0) TransactionAt(index int) BlockTransaction {
 	if index < 0 || index >= len(b.f.Transactions) {
 		return nil
 	}
-	return b.f.Transactions[index].Copy()
+	return b.f.Transactions.Copy()[index]
 }
 
 // StakingTransactionAt returns the staking transaction at the given index in this block.
@@ -56,12 +53,8 @@ func (b *BodyV0) CXReceiptAt(index int) *CXReceipt {
 
 // SetTransactions sets the list of transactions with a deep copy of the given
 // list.
-func (b *BodyV0) SetTransactions(newTransactions []*Transaction) {
-	var txs []*Transaction
-	for _, tx := range newTransactions {
-		txs = append(txs, tx.Copy())
-	}
-	b.f.Transactions = txs
+func (b *BodyV0) SetTransactions(newTransactions BlockTransactions) {
+	b.f.Transactions = newTransactions.Copy()
 }
 
 // SetStakingTransactions sets the list of staking transactions with a deep copy of the given
@@ -93,6 +86,11 @@ func (b *BodyV0) IncomingReceipts() (incomingReceipts CXReceiptsProofs) {
 	return nil
 }
 
+// IncomingDeploys returns incoming deploy proofs (unsupported in v0).
+func (b *BodyV0) IncomingDeploys() (incoming CXDeployProofs) {
+	return nil
+}
+
 // StakingTransactions returns the list of staking transactions.
 // The returned list is a deep copy; the caller may do anything with it without
 // affecting the original.
@@ -106,6 +104,14 @@ func (b *BodyV0) SetIncomingReceipts(newIncomingReceipts CXReceiptsProofs) {
 	if len(newIncomingReceipts) > 0 {
 		utils.Logger().Warn().
 			Msg("cannot store incoming CX receipts in v0 block body")
+	}
+}
+
+// SetIncomingDeploys sets incoming deploy proofs (unsupported in v0).
+func (b *BodyV0) SetIncomingDeploys(newIncomingDeploys CXDeployProofs) {
+	if len(newIncomingDeploys) > 0 {
+		utils.Logger().Warn().
+			Msg("cannot store incoming deploy proofs in v0 block body")
 	}
 }
 

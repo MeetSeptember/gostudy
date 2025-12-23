@@ -15,21 +15,20 @@ type BodyV2 struct {
 }
 
 type bodyFieldsV2 struct {
-	Transactions        []*Transaction
+	Transactions        BlockTransactions
 	StakingTransactions []*staking.StakingTransaction
 	Uncles              []*block.Header
 	IncomingReceipts    CXReceiptsProofs
+	IncomingDeploys     CXDeployProofs
+	OutgoingDeploys     CXDeploys
 }
 
 // Transactions returns the list of transactions.
 //
 // The returned list is a deep copy; the caller may do anything with it without
 // affecting the original.
-func (b *BodyV2) Transactions() (txs []*Transaction) {
-	for _, tx := range b.f.Transactions {
-		txs = append(txs, tx.Copy())
-	}
-	return txs
+func (b *BodyV2) Transactions() BlockTransactions {
+	return b.f.Transactions.Copy()
 }
 
 // StakingTransactions returns the list of staking transactions.
@@ -44,11 +43,12 @@ func (b *BodyV2) StakingTransactions() (txs []*staking.StakingTransaction) {
 
 // TransactionAt returns the transaction at the given index in this block.
 // It returns nil if index is out of bounds.
-func (b *BodyV2) TransactionAt(index int) *Transaction {
+func (b *BodyV2) TransactionAt(index int) BlockTransaction {
 	if index < 0 || index >= len(b.f.Transactions) {
 		return nil
 	}
-	return b.f.Transactions[index].Copy()
+	// Return a deep copy via Copy() of the container.
+	return b.f.Transactions.Copy()[index]
 }
 
 // StakingTransactionAt returns the staking transaction at the given index in this block.
@@ -78,12 +78,8 @@ func (b *BodyV2) CXReceiptAt(index int) *CXReceipt {
 
 // SetTransactions sets the list of transactions with a deep copy of the given
 // list.
-func (b *BodyV2) SetTransactions(newTransactions []*Transaction) {
-	var txs []*Transaction
-	for _, tx := range newTransactions {
-		txs = append(txs, tx.Copy())
-	}
-	b.f.Transactions = txs
+func (b *BodyV2) SetTransactions(newTransactions BlockTransactions) {
+	b.f.Transactions = newTransactions.Copy()
 }
 
 // SetStakingTransactions sets the list of staking transactions with a deep copy of the given
@@ -119,10 +115,30 @@ func (b *BodyV2) IncomingReceipts() (incomingReceipts CXReceiptsProofs) {
 	return b.f.IncomingReceipts.Copy()
 }
 
+// IncomingDeploys returns incoming deploy proofs.
+func (b *BodyV2) IncomingDeploys() (incoming CXDeployProofs) {
+	return b.f.IncomingDeploys.Copy()
+}
+
 // SetIncomingReceipts sets the list of incoming cross-shard transaction
 // receipts of this block with a dep copy of the given list.
 func (b *BodyV2) SetIncomingReceipts(newIncomingReceipts CXReceiptsProofs) {
 	b.f.IncomingReceipts = newIncomingReceipts.Copy()
+}
+
+// SetIncomingDeploys sets incoming deploy proofs.
+func (b *BodyV2) SetIncomingDeploys(newIncomingDeploys CXDeployProofs) {
+	b.f.IncomingDeploys = newIncomingDeploys.Copy()
+}
+
+// OutgoingDeploys returns outgoing deploy intents.
+func (b *BodyV2) OutgoingDeploys() CXDeploys {
+	return b.f.OutgoingDeploys.Copy()
+}
+
+// SetOutgoingDeploys sets outgoing deploy intents.
+func (b *BodyV2) SetOutgoingDeploys(newOutgoingDeploys CXDeploys) {
+	b.f.OutgoingDeploys = newOutgoingDeploys.Copy()
 }
 
 // EncodeRLP RLP-encodes the block body into the given writer.

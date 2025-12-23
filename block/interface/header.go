@@ -56,6 +56,12 @@ type Header interface {
 	// SetIncomingReceiptHash sets the ingress transaction receipt trie hash.
 	SetIncomingReceiptHash(newIncomingReceiptHash common.Hash)
 
+	// IncomingDeployHash is the ingress deploy proof trie hash.
+	IncomingDeployHash() common.Hash
+
+	// SetIncomingDeployHash sets the ingress deploy proof trie hash.
+	SetIncomingDeployHash(newIncomingDeployHash common.Hash)
+
 	// Bloom is the Bloom filter that indexes accounts and topics logged by smart
 	// contract transactions (executions) in this block.
 	Bloom() types.Bloom

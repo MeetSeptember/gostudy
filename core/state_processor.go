@@ -223,7 +223,7 @@ func (p *StateProcessor) Process(
 		p.bc,
 		p.beacon,
 		header, statedb, block.Transactions(),
-		receipts, outcxs, incxs, block.StakingTransactions(), slashes, sigsReady, func() uint64 { return header.ViewID().Uint64() },
+		receipts, outcxs, incxs, block.IncomingDeploys(), block.StakingTransactions(), slashes, sigsReady, func() uint64 { return header.ViewID().Uint64() },
 	)
 	if err != nil {
 		return nil, nil, nil, nil, 0, nil, statedb, errors.WithMessage(err, "[Process] Cannot finalize block")
@@ -249,7 +249,7 @@ func (p *StateProcessor) CacheProcessorResult(cacheKey interface{}, result *Proc
 
 // return true if it is valid
 func getTransactionType(
-	config *params.ChainConfig, header *block.Header, tx *types.Transaction,
+	config *params.ChainConfig, header *block.Header, tx types.BlockTransaction,
 ) types.TransactionType {
 	if header.ShardID() == tx.ShardID() &&
 		(!config.AcceptsCrossTx(header.Epoch()) ||
@@ -270,13 +270,22 @@ func getTransactionType(
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, statedb *state.DB, header *block.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.CXReceipt, []staking.StakeMsg, uint64, error) {
+func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, statedb *state.DB, header *block.Header, tx types.BlockTransaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, *types.CXReceipt, []staking.StakeMsg, uint64, error) {
+	return ApplyBlockTransaction(bc, author, gp, statedb, header, tx, usedGas, cfg)
+}
+
+// ApplyBlockTransaction applies any block transaction (legacy tx, JoyueDeployTx, etc).
+func ApplyBlockTransaction(
+	bc ChainContext, author *common.Address, gp *GasPool, statedb *state.DB,
+	header *block.Header, tx types.BlockTransaction, usedGas *uint64, cfg vm.Config,
+) (*types.Receipt, *types.CXReceipt, []staking.StakeMsg, uint64, error) {
 	config := bc.Config()
 	txType := getTransactionType(bc.Config(), header, tx)
 	if txType == types.InvalidTx {
 		return nil, nil, nil, 0, errors.New("Invalid Transaction Type")
 	}
 
+	// 如果是跨分片交易，但当前 Epoch 还不支持跨分片 -> 报错
 	if txType != types.SameShardTx && !config.AcceptsCrossTx(header.Epoch()) {
 		return nil, nil, nil, 0, errors.Errorf(
 			"cannot handle cross-shard transaction until after epoch %v (now %v)",
@@ -285,7 +294,8 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 	}
 
 	var signer types.Signer
-	if tx.IsEthCompatible() {
+	if legacy, ok := tx.(*types.Transaction); ok && legacy.IsEthCompatible() {
+		// 如果是以太坊格式，必须检查当前 Epoch 是否激活了 Eth 兼容特性
 		if !config.IsEthCompatible(header.Epoch()) {
 			return nil, nil, nil, 0, errors.New("ethereum compatible transactions not supported at current epoch")
 		}
@@ -293,6 +303,7 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 	} else {
 		signer = types.MakeSigner(config, header.Epoch())
 	}
+
 	msg, err := tx.AsMessage(signer)
 
 	// skip signer err for additiononly tx
@@ -300,14 +311,20 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 		return nil, nil, nil, 0, err
 	}
 
-	// Create a new context to be used in the EVM environment
+	// 创建上下文 (Block Context)
+	// 包含：Block Number, Timestamp, Coinbase (Author), Difficulty 等全局变量
 	context := NewEVMContext(msg, header, bc, author)
+	// 告诉 EVM 这是一笔什么类型的交易
 	context.TxType = txType
-	// Create a new environment which holds all relevant information
-	// about the transaction and calling mechanisms.
+
+	// 实例化虚拟机 (Instantiate EVM)
+	// 包含：StateDB (世界状态), Config (EIP 规则), Context
 	vmenv := vm.NewEVM(context, statedb, config, cfg)
 	// Apply the transaction to the current state (included in the env)
+
+	// 如果是智能合约result中有智能合约执行返回的结果
 	result, err := ApplyMessage(vmenv, msg, gp)
+
 	if err != nil {
 		to := ""
 		if m := msg.To(); m != nil {
@@ -326,6 +343,8 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 	} else {
 		root = statedb.IntermediateRoot(config.IsS3(header.Epoch())).Bytes()
 	}
+
+	//累加当前区块的总Gas用量
 	*usedGas += result.UsedGas
 
 	failedExe := result.VMErr != nil
@@ -334,7 +353,14 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 	receipt := types.NewReceipt(root, failedExe, *usedGas)
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = result.UsedGas
-	receipt.EffectiveGasPrice = tx.EffectiveGasPrice(big.NewInt(0), nil)
+	// Effective gas price: legacy tx implements EffectiveGasPrice; otherwise fall back to GasPrice.
+	if egp, ok := tx.(interface {
+		EffectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int
+	}); ok {
+		receipt.EffectiveGasPrice = egp.EffectiveGasPrice(big.NewInt(0), nil)
+	} else {
+		receipt.EffectiveGasPrice = new(big.Int).Set(tx.GasPrice())
+	}
 	// if the transaction created a contract, store the creation address in the receipt.
 	if msg.To() == nil {
 		receipt.ContractAddress = crypto.CreateAddress(vmenv.Context.Origin, tx.Nonce())
@@ -348,10 +374,14 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 
 	var cxReceipt *types.CXReceipt
 	// Do not create cxReceipt if EVM call failed
+
+	// 跨分片转出交易
+	// 它的钱已经在当前分片销毁了，需要生成一个凭证 (CXReceipt)，让目标分片拿着凭证去生成钱。
 	if txType == types.SubtractionOnly && !failedExe {
 		if vmenv.CXReceipt != nil {
 			return nil, nil, nil, 0, errors.New("cannot have cross shard receipt via precompile and directly")
 		}
+		// 手动生成跨分片收据
 		cxReceipt = &types.CXReceipt{
 			TxHash:    tx.Hash(),
 			From:      msg.From(),
@@ -364,11 +394,13 @@ func ApplyTransaction(bc ChainContext, author *common.Address, gp *GasPool, stat
 		if !failedExe {
 			if vmenv.CXReceipt != nil {
 				cxReceipt = vmenv.CXReceipt
-				// this tx.Hash needs to be the "original" tx.Hash
-				// since, in effect, we have added
-				// support for cross shard txs
-				// to eth txs
-				cxReceipt.TxHash = tx.HashByType()
+				// For eth-compatible legacy txs, the receiving shard expects the "original" hash.
+				// For other tx types, keep tx.Hash().
+				if legacy, ok := tx.(*types.Transaction); ok {
+					cxReceipt.TxHash = legacy.HashByType()
+				} else {
+					cxReceipt.TxHash = tx.Hash()
+				}
 			}
 		} else {
 			cxReceipt = nil

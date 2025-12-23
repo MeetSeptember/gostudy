@@ -265,9 +265,9 @@ func (e *engineImpl) VerifySeal(chain engine.ChainReader, header *block.Header) 
 // sigsReady signal indicates whether the commit sigs are populated in the header object.
 func (e *engineImpl) Finalize(
 	chain engine.ChainReader, beacon engine.ChainReader, header *block.Header,
-	state *state.DB, txs []*types.Transaction,
+	state *state.DB, txs types.BlockTransactions,
 	receipts []*types.Receipt, outcxs []*types.CXReceipt,
-	incxs []*types.CXReceiptsProof, stks staking.StakingTransactions,
+	incxs []*types.CXReceiptsProof, incDeploys []*types.CXDeployProof, outDeploys types.CXDeploys, stks staking.StakingTransactions,
 	doubleSigners slash.Records, sigsReady chan bool, viewID func() uint64,
 ) (*types.Block, reward.Reader, error) {
 
@@ -352,7 +352,7 @@ func (e *engineImpl) Finalize(
 	}
 	// Finalize the state root
 	header.SetRoot(state.IntermediateRoot(chain.Config().IsS3(header.Epoch())))
-	return types.NewBlock(header, txs, receipts, outcxs, incxs, stks), payout, nil
+	return types.NewBlockWithDeploys(header, txs, receipts, outcxs, incxs, incDeploys, stks, outDeploys), payout, nil
 }
 
 // Withdraw unlocked tokens to the delegators' accounts

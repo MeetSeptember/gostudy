@@ -218,6 +218,8 @@ func (st *StateTransition) TransitionDb() (ExecutionResult, error) {
 	sender := vm.AccountRef(msg.From())
 	homestead := st.evm.ChainConfig().IsS3(st.evm.EpochNumber) // s3 includes homestead
 	istanbul := st.evm.ChainConfig().IsIstanbul(st.evm.EpochNumber)
+
+	// 判断是创建合约交易还是普通转账交易
 	contractCreation := msg.To() == nil
 
 	// Pay intrinsic gas
@@ -231,6 +233,8 @@ func (st *StateTransition) TransitionDb() (ExecutionResult, error) {
 
 	// Execute the preparatory steps for state transition which includes:
 	// - reset transient storage(eip 1153)
+
+	// 清空上一笔交易可能残留的瞬态存储数据，确保当前交易在一个干净的环境下运行
 	st.evm.StateDB.Prepare()
 	evm := st.evm
 
@@ -239,10 +243,14 @@ func (st *StateTransition) TransitionDb() (ExecutionResult, error) {
 	var vmErr error
 
 	if contractCreation {
+		// Create 函数会创建一个新地址，部署代码，并运行构造函数 (Constructor)
+		// todo 在这个方法下我需要添加主合约和代理合约的部署逻辑
 		ret, _, st.gas, vmErr = evm.Create(sender, st.data, st.gas, st.value)
 	} else {
 		// Increment the nonce for the next transaction
 		st.state.SetNonce(msg.From(), st.state.GetNonce(sender.Address())+1)
+
+		//执行普通转账或者调用合约
 		ret, st.gas, vmErr = evm.Call(sender, st.to(), st.data, st.gas, st.value)
 	}
 	if vmErr != nil {

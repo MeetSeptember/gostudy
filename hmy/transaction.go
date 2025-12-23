@@ -19,6 +19,16 @@ func (hmy *Harmony) SendTx(ctx context.Context, signedTx *types.Transaction) err
 	return ErrFinalizedTransaction
 }
 
+// SendPoolTx submits any pool transaction into the node (extensible for new tx types like JoyueDeployTx).
+func (hmy *Harmony) SendPoolTx(ctx context.Context, poolTx types.PoolTransaction) error {
+	// For now, keep the same finalized check for legacy tx; for new tx types,
+	// we rely on txpool known-tx checks.
+	if legacy, ok := poolTx.(*types.Transaction); ok {
+		return hmy.SendTx(ctx, legacy)
+	}
+	return hmy.NodeAPI.AddPendingPoolTransaction(poolTx)
+}
+
 // ResendCx retrieve blockHash from txID and add blockHash to CxPool for resending
 // Note that cross shard txn is only for regular txns, not for staking txns, so the input txn hash
 // is expected to be regular txn hash

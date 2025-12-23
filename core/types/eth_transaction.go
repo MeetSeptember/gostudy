@@ -209,6 +209,7 @@ func (tx *EthTransaction) ConvertToHmy() *Transaction {
 	d2.R = new(big.Int).Set(d.R)
 	d2.S = new(big.Int).Set(d.S)
 
+	//核心区别在这里 如果shardID和toShardID不一样则是一个跨分片交易
 	d2.ShardID = tx.ShardID()
 	d2.ToShardID = tx.ToShardID()
 

@@ -88,6 +88,8 @@ type Harmony struct {
 type NodeAPI interface {
 	AddPendingStakingTransaction(*staking.StakingTransaction) error
 	AddPendingTransaction(newTx *types.Transaction) error
+	// AddPendingPoolTransaction adds a pool transaction (can be extended with new tx types).
+	AddPendingPoolTransaction(newTx types.PoolTransaction) error
 	Blockchain() core.BlockChain
 	Beaconchain() core.BlockChain
 	GetTransactionsHistory(address, txType, order string) ([]common.Hash, error)

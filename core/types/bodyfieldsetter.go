@@ -11,7 +11,7 @@ type BodyFieldSetter struct {
 }
 
 // Transactions sets the Transactions field of the body.
-func (bfs BodyFieldSetter) Transactions(newTransactions []*Transaction) BodyFieldSetter {
+func (bfs BodyFieldSetter) Transactions(newTransactions BlockTransactions) BodyFieldSetter {
 	bfs.b.SetTransactions(newTransactions)
 	return bfs
 }
@@ -31,6 +31,12 @@ func (bfs BodyFieldSetter) Uncles(newUncles []*block.Header) BodyFieldSetter {
 // IncomingReceipts sets the IncomingReceipts field of the body.
 func (bfs BodyFieldSetter) IncomingReceipts(newIncomingReceipts CXReceiptsProofs) BodyFieldSetter {
 	bfs.b.SetIncomingReceipts(newIncomingReceipts)
+	return bfs
+}
+
+// IncomingDeploys sets the IncomingDeploys field of the body.
+func (bfs BodyFieldSetter) IncomingDeploys(newIncomingDeploys CXDeployProofs) BodyFieldSetter {
+	bfs.b.SetIncomingDeploys(newIncomingDeploys)
 	return bfs
 }
 

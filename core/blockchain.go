@@ -225,10 +225,16 @@ type BlockChain interface {
 	ReadCXReceipts(shardID uint32, blockNum uint64, blockHash common.Hash) (types.CXReceipts, error)
 	// CXMerkleProof calculates the cross shard transaction merkle proof of a given destination shard.
 	CXMerkleProof(toShardID uint32, block *block.Header) (*types.CXMerkleProof, error)
+	// ReadCXDeploys retrieves deploy intents for a destination shard/block.
+	ReadCXDeploys(shardID uint32, blockNum uint64, blockHash common.Hash) (types.CXDeploys, error)
 	// WriteCXReceiptsProofSpent mark the CXReceiptsProof list with given unspent status
 	WriteCXReceiptsProofSpent(db rawdb.DatabaseWriter, cxps []*types.CXReceiptsProof) error
+	// WriteCXDeployProofSpent mark the CXDeployProof list with given unspent status
+	WriteCXDeployProofSpent(db rawdb.DatabaseWriter, cxps []*types.CXDeployProof) error
 	// IsSpent checks whether a CXReceiptsProof is spent.
 	IsSpent(cxp *types.CXReceiptsProof) bool
+	// IsDeploySpent checks whether a CXDeployProof is spent.
+	IsDeploySpent(cxp *types.CXDeployProof) bool
 	// ReadTxLookupEntry returns where the given transaction resides in the chain,
 	// as a (block hash, block number, index in transaction list) triple.
 	// returns 0, 0 if not found.

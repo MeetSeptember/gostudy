@@ -68,6 +68,9 @@ type (
 // run runs the given contract and takes care of running precompiles with a fallback to the byte code interpreter.
 func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, error) {
 	if contract.CodeAddr != nil {
+
+		//预编译合约判断
+
 		precompiles := PrecompiledContractsHomestead
 		// assign empty write capable precompiles till they are available in the fork
 		var writeCapablePrecompiles map[common.Address]WriteCapablePrecompiledContract
@@ -120,6 +123,8 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 			}
 		}
 	}
+
+	// 解释器执行
 	for _, interpreter := range evm.interpreters {
 		if interpreter.CanRun(contract.Code) {
 			if evm.interpreter != interpreter {
@@ -222,8 +227,13 @@ type EVM struct {
 	// (although the EVM object itself is ephemeral)
 	StakeMsgs []stakingTypes.StakeMsg
 	CXReceipt *types.CXReceipt
+
+	ShadowReader ShadowReader
 }
 
+// 2. 修改 NewEVM 函数签名，允许传入 reader
+// 注意：这可能需要修改很多调用 NewEVM 的地方。
+// 为了最小化修改，建议使用 Config 模式或者 Setter。
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
 func NewEVM(ctx Context, statedb StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
@@ -234,6 +244,7 @@ func NewEVM(ctx Context, statedb StateDB, chainConfig *params.ChainConfig, vmCon
 		chainConfig:  chainConfig,
 		chainRules:   chainConfig.Rules(ctx.EpochNumber),
 		interpreters: make([]Interpreter, 0, 1),
+		ShadowReader: nil,
 	}
 
 	//if chainConfig.IsS3(ctx.EpochNumber) {
@@ -258,6 +269,11 @@ func NewEVM(ctx Context, statedb StateDB, chainConfig *params.ChainConfig, vmCon
 	evm.interpreter = evm.interpreters[0]
 
 	return evm
+}
+
+// 添加一个 Setter 方法，方便 Node 在创建 EVM 后注入依赖
+func (evm *EVM) SetShadowReader(reader ShadowReader) {
+	evm.ShadowReader = reader
 }
 
 // Cancel cancels any running EVM operation. This may be called concurrently and
@@ -297,6 +313,7 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		return nil, gas, ErrInsufficientBalance
 	}
 
+	// 快照 存档点
 	var (
 		to       = AccountRef(addr)
 		snapshot = evm.StateDB.Snapshot()
@@ -331,21 +348,33 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			}
 			return nil, gas, nil
 		}
+		// 如果调用了一个不存在的账户则自动创建一个空账户
 		evm.StateDB.CreateAccount(addr)
 	}
+	// 物理转账
+	// 修改 StateDB，把钱从 Caller 扣掉，加到 To 账上。
 	evm.Transfer(evm.StateDB, caller.Address(), to.Address(), value, txType)
 
 	codeHash := evm.StateDB.GetCodeHash(addr)
+	// 如果是转账操作则code = nil
 	code := evm.StateDB.GetCode(addr)
+
 	// If address is a validator address, then it's not a smart contract address
 	// we don't use its code and codeHash fields
+	// Harmony 特有逻辑：
+	// 如果目标是一个验证者 (Validator) 的地址，我们强制把它的代码视为空。
+	// 即使验证者在那个地址上部署了东西，我们也不跑。这是为了防止把共识层的身份误当成合约层来执行。
 	if evm.Context.IsValidator(evm.StateDB, addr) {
 		codeHash = emptyCodeHash
 		code = nil
 	}
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
+
+	// 初始化环境，这里的 NewContract 并不是在区块链上“部署”一个新合约，而是在内存里创建一个“执行环境对象”
+	// NewContract 会创建一个新的内存、栈和 Gas 计量器。
 	contract := NewContract(caller, to, value, gas)
+
 	contract.SetCallCode(&addr, codeHash, code)
 
 	// Even if the account has no code, we need to continue because it might be a precompile
@@ -359,16 +388,25 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 			evm.vmConfig.Tracer.CaptureEnd(ret, gas-contract.Gas, time.Since(start), err)
 		}()
 	}
+	// run 函数内部会判断：如果是预编译合约，直接运行 Go 代码；如果是普通合约，运行解释器。
 	ret, err = run(evm, contract, input, false)
 
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally
 	// when we're in homestead this also counts for code storage gas errors.
+
+	//矿工运行这段代码也需要支付相应的gas费
 	if err != nil {
+		// 只要出错，立马回滚到之前的快照
 		evm.StateDB.RevertToSnapshot(snapshot)
+		// 情况 A: 恶性错误 (OutOfGas, StackOverflow 等)
+		// 惩罚：没收剩下的所有 Gas！
 		if err != ErrExecutionReverted {
 			contract.UseGas(contract.Gas)
 		}
+		// 情况 B: 良性错误 (Revert)
+		// 也就是合约里显式写了 revert()。
+		// 处理：不没收剩余 Gas，剩下的退给用户。
 	}
 	return ret, contract.Gas, err
 }

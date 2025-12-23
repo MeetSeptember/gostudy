@@ -62,10 +62,12 @@ func WriteBlockTxLookUpEntries(db DatabaseWriter, block *types.Block) error {
 		if err := db.Put(key, val); err != nil {
 			return err
 		}
-		// Also put a lookup entry for eth transaction's hash
-		key = txLookupKey(tx.ConvertToEth().Hash())
-		if err := db.Put(key, val); err != nil {
-			return err
+		// Also put a lookup entry for eth transaction's hash (legacy tx only).
+		if legacy, ok := tx.(*types.Transaction); ok {
+			key = txLookupKey(legacy.ConvertToEth().Hash())
+			if err := db.Put(key, val); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -113,16 +115,22 @@ func ReadTransaction(db ethdb.Reader, hash common.Hash) (*types.Transaction, com
 			Msg("block Body referenced missing")
 		return nil, common.Hash{}, 0, 0
 	}
-	tx := body.TransactionAt(int(txIndex))
+	txAny := body.TransactionAt(int(txIndex))
 	missing := false
-	if tx == nil {
+	if txAny == nil {
 		missing = true
 	} else {
-		hmyHash := tx.Hash()
-		ethHash := tx.ConvertToEth().Hash()
-
-		if !bytes.Equal(hash.Bytes(), hmyHash.Bytes()) && !bytes.Equal(hash.Bytes(), ethHash.Bytes()) {
+		tx, ok := txAny.(*types.Transaction)
+		if !ok {
+			// This accessor is legacy-only.
 			missing = true
+		} else {
+			hmyHash := tx.Hash()
+			ethHash := tx.ConvertToEth().Hash()
+
+			if !bytes.Equal(hash.Bytes(), hmyHash.Bytes()) && !bytes.Equal(hash.Bytes(), ethHash.Bytes()) {
+				missing = true
+			}
 		}
 	}
 
@@ -132,6 +140,13 @@ func ReadTransaction(db ethdb.Reader, hash common.Hash) (*types.Transaction, com
 			Str("hash", blockHash.Hex()).
 			Uint64("index", txIndex).
 			Msg("Transaction referenced missing")
+		return nil, common.Hash{}, 0, 0
+	}
+	if txAny == nil {
+		return nil, common.Hash{}, 0, 0
+	}
+	tx, ok := txAny.(*types.Transaction)
+	if !ok {
 		return nil, common.Hash{}, 0, 0
 	}
 	return tx, blockHash, blockNumber, txIndex

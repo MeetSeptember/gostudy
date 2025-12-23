@@ -147,9 +147,9 @@ type Engine interface {
 		chain ChainReader,
 		beacon ChainReader,
 		header *block.Header,
-		state *state.DB, txs []*types.Transaction,
+		state *state.DB, txs types.BlockTransactions,
 		receipts []*types.Receipt, outcxs []*types.CXReceipt,
-		incxs []*types.CXReceiptsProof, stks staking.StakingTransactions,
+		incxs []*types.CXReceiptsProof, incDeploys []*types.CXDeployProof, outDeploys types.CXDeploys, stks staking.StakingTransactions,
 		doubleSigners slash.Records, sigsReady chan bool, viewID func() uint64,
 	) (*types.Block, reward.Reader, error)
 }

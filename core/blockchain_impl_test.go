@@ -24,7 +24,7 @@ func TestPrepareStakingMetadata(t *testing.T) {
 	stxs := []*staking.StakingTransaction{stx1, stx2}
 
 	// make a fake block header
-	block := types.NewBlock(header, txs, []*types.Receipt{types.NewReceipt([]byte{}, false, 0), types.NewReceipt([]byte{}, false, 0),
+	block := types.NewBlock(header, types.BlockTransactionsFromLegacy(txs), []*types.Receipt{types.NewReceipt([]byte{}, false, 0), types.NewReceipt([]byte{}, false, 0),
 		types.NewReceipt([]byte{}, false, 0)}, nil, nil, stxs)
 	// run it
 	if _, _, err := chain.prepareStakingMetaData(block, []staking.StakeMsg{&staking.Delegate{}}, db); err != nil {

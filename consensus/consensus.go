@@ -79,6 +79,7 @@ type Consensus struct {
 	multiSigBitmap *bls_cosi.Mask // Bitmap for parsing multisig bitmap from validators
 
 	pendingCXReceipts map[utils.CXKey]*types.CXReceiptsProof // All the receipts received but not yet processed for Consensus
+	pendingCXDeploys  map[utils.CXKey]*types.CXDeployProof   // All the deploy proofs received but not yet processed
 	// Registry for services.
 	registry *registry.Registry
 	// Minimal number of peers in the shard

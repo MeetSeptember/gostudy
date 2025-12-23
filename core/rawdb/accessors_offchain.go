@@ -145,6 +145,59 @@ func DeleteCXReceiptsProofSpent(db DatabaseDeleter, shardID uint32, number uint6
 	return nil
 }
 
+// WriteCXDeploys stores all cross-shard deploy intents for a destination shard at a block.
+func WriteCXDeploys(db DatabaseWriter, shardID uint32, number uint64, hash common.Hash, deploys types.CXDeploys) error {
+	bytes, err := rlp.EncodeToBytes(deploys)
+	if err != nil {
+		utils.Logger().Error().Msg("[WriteCXDeploys] Failed to encode cross shard deploy intents")
+	}
+	if err := db.Put(cxDeployKey(shardID, number, hash), bytes); err != nil {
+		utils.Logger().Error().Msg("[WriteCXDeploys] Failed to store cxdeploys")
+	}
+	return err
+}
+
+// ReadCXDeploys retrieves deploy intents for a destination shard/block.
+func ReadCXDeploys(db DatabaseReader, shardID uint32, number uint64, hash common.Hash) (types.CXDeploys, error) {
+	data, err := db.Get(cxDeployKey(shardID, number, hash))
+	if err != nil || len(data) == 0 {
+		utils.Logger().Error().Err(err).Uint64("number", number).Int("dataLen", len(data)).Msg("ReadCXDeploys")
+		return nil, err
+	}
+	deploys := types.CXDeploys{}
+	if err := rlp.DecodeBytes(data, &deploys); err != nil {
+		return nil, err
+	}
+	return deploys, nil
+}
+
+// WriteCXDeployProofSpent marks a CXDeployProof as spent for a destination shard and block number.
+func WriteCXDeployProofSpent(dbw DatabaseWriter, shardID uint32, number uint64) error {
+	if err := dbw.Put(cxDeploySpentKey(shardID, number), []byte{SpentByte}); err != nil {
+		utils.Logger().Error().Msg("Failed to write CX deploy proof")
+		return err
+	}
+	return nil
+}
+
+// ReadCXDeployProofSpent checks whether a CXDeployProof is marked spent.
+func ReadCXDeployProofSpent(db DatabaseReader, shardID uint32, number uint64) (byte, error) {
+	data, err := db.Get(cxDeploySpentKey(shardID, number))
+	if err != nil || len(data) == 0 {
+		return NAByte, errors.New("[ReadCXDeployProofSpent] Cannot find the key")
+	}
+	return data[0], nil
+}
+
+// DeleteCXDeployProofSpent removes the spent marker for a deploy proof.
+func DeleteCXDeployProofSpent(db DatabaseDeleter, shardID uint32, number uint64) error {
+	if err := db.Delete(cxDeploySpentKey(shardID, number)); err != nil {
+		utils.Logger().Error().Msg("Failed to delete deploy proof unspent indicator")
+		return err
+	}
+	return nil
+}
+
 // ReadValidatorSnapshot retrieves validator's snapshot by its address
 func ReadValidatorSnapshot(
 	db DatabaseReader, addr common.Address, epoch *big.Int,
@@ -238,6 +291,44 @@ func IteratorCXReceiptsProofSpent(iterator DatabaseIterator, cb func(it ethdb.It
 
 	for iter.Next() {
 		// validatorSnapshotKey = validatorSnapshotPrefix + addr bytes (20 bytes) + epoch bytes
+		key := iter.Key()
+		shardID := binary.BigEndian.Uint32(key[shardOffset : shardOffset+4])
+		number := binary.BigEndian.Uint64(key[numberOffset : numberOffset+8])
+		if !cb(iter, shardID, number) {
+			return
+		}
+	}
+}
+
+// IteratorCXDeploy iterates over deploy intents keyed by shardID/number/hash.
+func IteratorCXDeploy(iterator DatabaseIterator, cb func(it ethdb.Iterator, shardID uint32, number uint64, hash common.Hash) bool) {
+	preifxKey := cxDeployPrefix
+	iter := iterator.NewIterator(preifxKey, nil)
+	defer iter.Release()
+	shardOffset := len(preifxKey)
+	numberOffset := shardOffset + 4
+	hashOffset := numberOffset + 8
+
+	for iter.Next() {
+		key := iter.Key()
+		shardID := binary.BigEndian.Uint32(key[shardOffset : shardOffset+4])
+		number := binary.BigEndian.Uint64(key[numberOffset : numberOffset+8])
+		hash := common.BytesToHash(key[hashOffset : hashOffset+20])
+		if !cb(iter, shardID, number, hash) {
+			return
+		}
+	}
+}
+
+// IteratorCXDeployProofSpent iterates over spent markers for deploy proofs.
+func IteratorCXDeployProofSpent(iterator DatabaseIterator, cb func(it ethdb.Iterator, shardID uint32, number uint64) bool) {
+	preifxKey := cxDeploySpentPrefix
+	iter := iterator.NewIterator(preifxKey, nil)
+	defer iter.Release()
+	shardOffset := len(preifxKey)
+	numberOffset := shardOffset + 4
+
+	for iter.Next() {
 		key := iter.Key()
 		shardID := binary.BigEndian.Uint32(key[shardOffset : shardOffset+4])
 		number := binary.BigEndian.Uint64(key[numberOffset : numberOffset+8])

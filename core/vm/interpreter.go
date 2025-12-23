@@ -291,13 +291,13 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 
 		switch {
 		case err != nil:
-			return nil, err
+			return nil, err // 出错了（Gas不足、栈溢出）
 		case operation.reverts:
-			return res, ErrExecutionReverted
+			return res, ErrExecutionReverted // 合约主动叫停 (revert)，返回错误和数据
 		case operation.halts:
-			return res, nil
+			return res, nil // 正常结束 (STOP, RETURN)，返回数据
 		case !operation.jumps:
-			pc++
+			pc++ // 只是普通计算，指针往下移一位，继续下一条指令
 		}
 	}
 	return nil, nil

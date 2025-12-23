@@ -320,6 +320,10 @@ func (a Stub) ReadCXReceipts(shardID uint32, blockNum uint64, blockHash common.H
 	return nil, errors.Errorf("method ReadCXReceipts not implemented for %s", a.Name)
 }
 
+func (a Stub) ReadCXDeploys(shardID uint32, blockNum uint64, blockHash common.Hash) (types.CXDeploys, error) {
+	return nil, errors.Errorf("method ReadCXDeploys not implemented for %s", a.Name)
+}
+
 func (a Stub) CXMerkleProof(toShardID uint32, block *block.Header) (*types.CXMerkleProof, error) {
 	return nil, errors.Errorf("method CXMerkleProof not implemented for %s", a.Name)
 }
@@ -328,7 +332,15 @@ func (a Stub) WriteCXReceiptsProofSpent(db rawdb.DatabaseWriter, cxps []*types.C
 	return errors.Errorf("method WriteCXReceiptsProofSpent not implemented for %s", a.Name)
 }
 
+func (a Stub) WriteCXDeployProofSpent(db rawdb.DatabaseWriter, cxps []*types.CXDeployProof) error {
+	return errors.Errorf("method WriteCXDeployProofSpent not implemented for %s", a.Name)
+}
+
 func (a Stub) IsSpent(cxp *types.CXReceiptsProof) bool {
+	return false
+}
+
+func (a Stub) IsDeploySpent(cxp *types.CXDeployProof) bool {
 	return false
 }
 

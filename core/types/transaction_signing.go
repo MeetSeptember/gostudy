@@ -170,6 +170,20 @@ func (s EIP155Signer) SignatureValues(tx InternalTransaction, sig []byte) (R, S,
 // Hash returns the hash to be signed by the sender.
 // It does not uniquely identify the transaction.
 func (s EIP155Signer) Hash(tx InternalTransaction) common.Hash {
+	// JoyueDeployTx: include both master+agent initcode and salt in the signing hash.
+	if j, ok := tx.(*JoyueDeployTx); ok {
+		return hash.FromRLP([]interface{}{
+			j.Nonce(),
+			j.GasPrice(),
+			j.GasLimit(),
+			j.ShardID(),
+			j.Value(),
+			j.MasterInitCode(),
+			j.AgentInitCode(),
+			j.DeploySalt(),
+			s.chainID, uint(0), uint(0),
+		})
+	}
 	if params.IsEthCompatible(s.chainID) {
 		// following the same logic as in go-eth implementation
 		return hash.FromRLP([]interface{}{
@@ -240,6 +254,19 @@ func (fs FrontierSigner) SignatureValues(tx InternalTransaction, sig []byte) (r,
 // Hash returns the hash to be signed by the sender.
 // It does not uniquely identify the transaction.
 func (fs FrontierSigner) Hash(tx InternalTransaction) common.Hash {
+	// JoyueDeployTx: include both master+agent initcode and salt in the signing hash.
+	if j, ok := tx.(*JoyueDeployTx); ok {
+		return hash.FromRLP([]interface{}{
+			j.Nonce(),
+			j.GasPrice(),
+			j.GasLimit(),
+			j.ShardID(),
+			j.Value(),
+			j.MasterInitCode(),
+			j.AgentInitCode(),
+			j.DeploySalt(),
+		})
+	}
 	return hash.FromRLP([]interface{}{
 		tx.Nonce(),
 		tx.GasPrice(),
