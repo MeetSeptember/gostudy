@@ -30,7 +30,7 @@ fi
 
 if [ "${VERBOSE}" = "true" ]; then
     echo "[WARN] - running with verbose logs"
-    ./test/deploy.sh -v -B -D 600000 "${BLOCK_PER_EPOCH_OPT[@]}" "${BLOCK_PER_EPOCH_V2_OPT[@]}" "${SYNC_OPT[@]}" "${configfile}"
+    ./test/deploy.sh -e -v -B -D 600000 "${BLOCK_PER_EPOCH_OPT[@]}" "${BLOCK_PER_EPOCH_V2_OPT[@]}" "${SYNC_OPT[@]}" "${configfile}"
 else
-    ./test/deploy.sh -B -D 600000 "${BLOCK_PER_EPOCH_OPT[@]}" "${BLOCK_PER_EPOCH_V2_OPT[@]}" "${SYNC_OPT[@]}" "${configfile}"
+    ./test/deploy.sh -e -B -D 600000 "${BLOCK_PER_EPOCH_OPT[@]}" "${BLOCK_PER_EPOCH_V2_OPT[@]}" "${SYNC_OPT[@]}" "${configfile}"
 fi
