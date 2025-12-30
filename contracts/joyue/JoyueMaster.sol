@@ -14,7 +14,8 @@ contract JoyueMaster {
      * @notice 部署事件（在 constructor emit）
      * @param master      Master 合约地址（address(this)）
      * @param salt       预留字段：未来如果做 CREATE2 / factory 可用
-     * @param agentCreationCode 完整的 Agent Creation Code（包含 constructor args 的那段 tx.data）
+     * @param agentCreationCode Agent 合约的纯 bytecode（不含构造函数参数）
+     *                          节点部署时会动态添加构造函数参数：constructor(address master_, uint32 masterShardId_, uint32 agentShardId_)
      * @param masterShardId  master 分片 id（仅做事件携带，不由 EVM 强制）
      */
     event MasterDeployed(
@@ -46,7 +47,8 @@ contract JoyueMaster {
 
     /**
      * @param salt_ 预留字段
-     * @param agentCreationCode_ 完整的 agent creation code（注意：这个参数会写进日志，太大可能导致部署交易非常昂贵）
+     * @param agentCreationCode_ Agent 合约的纯 bytecode（不含构造函数参数）
+     *                           节点部署时会动态添加构造函数参数（注意：这个参数会写进日志，太大可能导致部署交易非常昂贵）
      * @param masterShardId_ master shard id（仅做标识）
      */
     constructor(bytes32 salt_, bytes memory agentCreationCode_, uint32 masterShardId_) {

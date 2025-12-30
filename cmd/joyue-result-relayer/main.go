@@ -28,13 +28,15 @@ import (
 JOYUE Result Relayer（方案A：Agent ->(event)-> Relayer -> Master）
 
 这个 relayer 的职责：
-1) 在各个 agent shard 上监听 JoyueAgent 发出的 AgentResult 事件；
+1) 在各个 agent shard 上监听 JoyueAgent 发出的 AgentResult 事件（包括 master shard，如果 master shard 也部署了 agent）；
 2) 将事件里的 payload 转发到 master shard（例如 shard0）的 JoyueMaster.submitAgentResult；
 3) 用户之后可以在 master shard 上调用 JoyueMaster.getResult(requestId) 查询“返回值/意图”。
 
 重要说明：
 - 这是“功能演示版”，不验证跨分片 proof，不做权限控制。
 - 安全模型：信任 relayer 搬运日志；生产应增加：签名/证明/白名单/费控等。
+- 如果 master shard 也部署了 agent 合约，用户可以在 master shard 上调用 agent.execute()，
+  此时 relayer 也会监听 master shard 的 AgentResult 事件并转发到 master 合约（同分片内调用）。
 
 兼容性：
 - 本仓库 go-ethereum replace 到 v1.11.2，因此事件 data 解码使用 Arguments.Unpack（不要用 UnpackIntoInterface）。
@@ -74,8 +76,8 @@ func main() {
 	var (
 		// master shard RPC：用于发送 submitAgentResult 交易
 		masterRPC = flag.String("master-rpc", "http://127.0.0.1:9500", "master 分片 RPC（HTTP），用于发送 submitAgentResult")
-		// agent shards：需要监听的分片列表（不包含 master shard 也可以）
-		shardsFlag = flag.String("agent-shards", "", "agent 分片列表：id=url,id=url,...（例如 1=http://127.0.0.1:9501）")
+		// agent shards：需要监听的分片列表（如果 master shard 也部署了 agent，应该把 master shard 也加进来）
+		shardsFlag = flag.String("agent-shards", "", "agent 分片列表：id=url,id=url,...（例如 0=http://127.0.0.1:9500,1=http://127.0.0.1:9501，如果 master shard 也部署了 agent 则必须包含 master shard）")
 
 		// 只处理某一个 master 合约（强烈建议填，减少误匹配）
 		masterAddrStr = flag.String("master", "", "master 合约地址（0x...），用于 topic 过滤（必填）")

@@ -580,6 +580,12 @@ func createGlobalConfig(hc harmonyconfig.HarmonyConfig) (*nodeconfig.ConfigType,
 	nodeConfig.InsertChainBatchSize = hc.Sync.StagedSyncCfg.InsertChainBatchSize
 	nodeConfig.LogProgress = hc.Sync.StagedSyncCfg.LogProgress
 	nodeConfig.DebugMode = hc.Sync.StagedSyncCfg.DebugMode
+
+	// 传递 Joyue 配置
+	nodeConfig.Joyue.AutoDeployEnabled = hc.Joyue.AutoDeployEnabled
+	nodeConfig.Joyue.DeployPrivateKey = hc.Joyue.DeployPrivateKey
+	nodeConfig.Joyue.OtherShardRPCs = hc.Joyue.OtherShardRPCs
+
 	// P2P private key is used for secure message transfer between p2p nodes.
 	nodeConfig.P2PPriKey, _, err = utils.LoadKeyFromFile(hc.P2P.KeyFile)
 	if err != nil {

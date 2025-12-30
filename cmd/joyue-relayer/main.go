@@ -151,6 +151,10 @@ func main() {
 		waitReceipt    = flag.Bool("wait-receipt", false, "发送部署交易后等待 receipt，并记录 agent 合约地址")
 		receiptTimeout = flag.Duration("receipt-timeout", 90*time.Second, "等待 receipt 的超时时间")
 
+		// 部署策略：是否在 master shard（例如 shard0）也部署 agent
+		// 默认 true：满足“所有分片都部署代理合约”的需求
+		deployOnMasterShard = flag.Bool("deploy-on-master-shard", true, "是否在 master shard 也部署 agent（默认 true）")
+
 		// state 文件路径
 		statePath = flag.String("state-file", "joyue-relayer-state.json", "本地 state 文件（用于避免重复处理）")
 
@@ -216,21 +220,22 @@ func main() {
 
 	for {
 		err := tick(ctx, tickArgs{
-			masterClient:      masterClient,
-			masterEvent:       masterEvent,
-			shards:            shards,
-			privKey:           privKey,
-			relayerAddr:       relayerAddr,
-			maxAgentCodeBytes: *maxAgentCodeBytes,
-			confirmations:     *confirmations,
-			maxRange:          *maxRange,
-			gasLimit:          *gasLimit,
-			gasTipGwei:        *gasTipGwei,
-			waitReceipt:       *waitReceipt,
-			receiptTimeout:    *receiptTimeout,
-			dryRun:            *dryRun,
-			statePath:         *statePath,
-			state:             st,
+			masterClient:        masterClient,
+			masterEvent:         masterEvent,
+			shards:              shards,
+			privKey:             privKey,
+			relayerAddr:         relayerAddr,
+			maxAgentCodeBytes:   *maxAgentCodeBytes,
+			deployOnMasterShard: *deployOnMasterShard,
+			confirmations:       *confirmations,
+			maxRange:            *maxRange,
+			gasLimit:            *gasLimit,
+			gasTipGwei:          *gasTipGwei,
+			waitReceipt:         *waitReceipt,
+			receiptTimeout:      *receiptTimeout,
+			dryRun:              *dryRun,
+			statePath:           *statePath,
+			state:               st,
 
 			forwardAgent:       *forwardAgent,
 			agentEvent:         agentEvent,
@@ -263,6 +268,9 @@ type tickArgs struct {
 
 	statePath string
 	state     *stateFile
+
+	// 是否在 master shard 也部署 agent（默认 true：所有分片都部署）
+	deployOnMasterShard bool
 
 	// 方案A：监听 AgentResult 并转发到 master
 	forwardAgent       bool
@@ -326,9 +334,11 @@ func tick(ctx context.Context, a tickArgs) error {
 		a.state.MasterAddress = evt.Master.Hex()
 		a.state.MasterShardID = evt.MasterShardID
 
-		// 4.2 对每个非 master shard 发送部署交易
+		// 4.2 对所有分片发送部署交易（默认包括 master shard，满足"所有分片都部署代理合约"的需求）
+		// 注意：如果 deployOnMasterShard=false，则跳过 master shard（仅部署到非 master 分片）
 		for _, shard := range a.shards {
-			if shard.ID == evt.MasterShardID {
+			// 如果 deployOnMasterShard=false，则跳过 master shard
+			if !a.deployOnMasterShard && shard.ID == evt.MasterShardID {
 				continue
 			}
 			key := makeKey(evt.Master, shard.ID)
@@ -521,6 +531,7 @@ type agentResult struct {
 	RequestID common.Hash
 	User      common.Address
 	Payload   []byte
+	Sender    common.Address
 }
 
 func parseAgentResult(ev abi.Event, lg ethtypes.Log) (*agentResult, error) {

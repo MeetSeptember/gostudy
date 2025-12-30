@@ -191,7 +191,8 @@ To keep things consistent, we have a docker image to run all tests. **These are 
 
 Note that all test Docker containers bind several ports to the host machine for your convenience. The ports are:
 * `9500` - Shard 0 RPC for a validator
-* `9501` - Shard 1 RPC for a validator
+* `9501` - Shard 0 RPC Auth for a validator
+* `9502` - Shard 1 RPC for a validator (note: actual port depends on the P2P port of shard 1's first node, which is 9002, so RPC = 9002 + 500 = 9502)
 * `9599` - Shard 0 RPC for an explorer
 * `9598` - Shard 1 RPC for an explorer
 * `9799` - Shard 0 Rosetta (for an explorer)

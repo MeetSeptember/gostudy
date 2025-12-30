@@ -340,6 +340,7 @@ func applyRootFlags(cmd *cobra.Command, config *harmonyconfig.HarmonyConfig) {
 	applyShardDataFlags(cmd, config)
 	applyGPOFlags(cmd, config)
 	applyCacheFlags(cmd, config)
+	applyJoyueFlags(cmd, config)
 }
 
 func registerRootCmdFlags(rootCmd *cobra.Command) error {

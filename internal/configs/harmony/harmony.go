@@ -41,6 +41,21 @@ type HarmonyConfig struct {
 	GPO        GasPriceOracleConfig
 	Preimage   *PreimageConfig
 	Cache      CacheConfig
+
+	Joyue JoyueConfig
+}
+
+type JoyueConfig struct {
+	// 是否启用自动部署
+	AutoDeployEnabled bool `toml:"auto_deploy_enabled"`
+
+	// 部署私钥（hex，不带 0x）
+	DeployPrivateKey string `toml:"deploy_private_key"`
+
+	// 其他分片的 RPC 地址
+	// 格式：shardID=rpcURL,shardID=rpcURL
+	// 例如：1=http://127.0.0.1:9501,2=http://127.0.0.1:9502
+	OtherShardRPCs string `toml:"other_shard_rpcs"`
 }
 
 func (hc HarmonyConfig) ToRPCServerConfig() nodeconfig.RPCServerConfig {

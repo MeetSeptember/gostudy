@@ -1,0 +1,27 @@
+{
+  "lastBlock": 3916,
+  "deployments": {
+    "0x12a4113F44E5689C93df233008FD805BDc882ABb-0": {
+      "deployTxHash": "0x0ecd761afb63c6f5f5daa80edaa95ce5fbfa993a7ce399cab696f98151d1953f",
+      "agentAddress": "0x61a049be2326C44637b6d6AfdF92480f67DCf076",
+      "status": "mined",
+      "updatedAt": "2025-12-25T12:34:18Z"
+    },
+    "0x12a4113F44E5689C93df233008FD805BDc882ABb-1": {
+      "deployTxHash": "0xcc7b13317e0a0a09ab077cc2b7206b73960e145ec0897fb8aa2b7da2f1fe8abf",
+      "agentAddress": "0x63169D7049Fa7cfA842179AeC59CED7B00B32733",
+      "status": "mined",
+      "updatedAt": "2025-12-25T12:34:21Z"
+    }
+  },
+  "masterAddress": "0x12a4113F44E5689C93df233008FD805BDc882ABb",
+  "lastAgentBlock": {
+    "1": 3917
+  },
+  "relayed": {
+    "1-0x3eb80504220dad77d22cafab5b9594b2262fb0e668c2cd8d40885f6b5c08a6ff": "0x49c6c66fe48a753af6509100d98f50dd6531035177819d7e3f3bbee8ad3475db",
+    "1-0x5e6b45c5233973e5b0dda0333b57df8c15d81dbc349793840f914c816718e23a": "0x518a3e74e216898cce1882d72f71399ffd5560b73b8d7aedbcebe7448ab6c897",
+    "1-0x7f9068e918656129ece4f082269088b1b4efeb79dd413ec31ae180b4cc0aa772": "0xb071fa158e7f2f6cf206f0ae08deb646edd1762c29aa4543ce260cd130b90732",
+    "1-0x9bddd06ce9320b3ef3317cf7d36d1d1dcfe843b6a785c6e1070c348c696232b3": "0x60390d838ee4a0fc86b22d867ddd2964254ba3eed343cdeaeb83de9687ce6dcc"
+  }
+}

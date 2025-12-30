@@ -10,14 +10,6 @@ pragma solidity >=0.4.22 <0.9.0;
  * - 后续第二阶段才会把“代理合约执行意图 + 主合约权威结算”等逻辑接上来。
  */
 contract JoyueAgent {
-    /**
-     * 第一阶段“为了能部署成功”的最简实现：
-     * - constructor 不带参数，这样 relayer 只要转发一段统一的 creation code 就能在所有分片部署成功。
-     *
-     * 如果后续你确实需要把 master/shard 信息写进 agent：
-     * - 可以加一个 initialize(master, masterShardId, agentShardId) 的一次性初始化函数
-     * - 或者升级为 CREATE2 + factory 的方式保证地址/配置一致
-     */
     bool public initialized;
     address public master;
     uint32 public masterShardId;
@@ -31,6 +23,20 @@ contract JoyueAgent {
 
     uint256 private _reqCounter;
 
+    /// @notice 构造函数：在部署时初始化主合约地址和分片信息
+    /// @param master_ 主合约地址
+    /// @param masterShardId_ 主合约所在分片 ID
+    /// @param agentShardId_ 代理合约所在分片 ID
+    constructor(address master_, uint32 masterShardId_, uint32 agentShardId_) {
+        initialized = true;
+        master = master_;
+        masterShardId = masterShardId_;
+        agentShardId = agentShardId_;
+        emit Initialized(master_, masterShardId_, agentShardId_);
+    }
+
+    /// @notice 兼容旧版本的初始化函数（已废弃，保留用于向后兼容）
+    /// @dev 如果合约通过构造函数初始化，此函数将始终 revert
     function initialize(address master_, uint32 masterShardId_, uint32 agentShardId_) external {
         require(!initialized, "already initialized");
         initialized = true;

@@ -143,6 +143,11 @@ var defaultConfig = harmonyconfig.HarmonyConfig{
 		BlockGasLimit:     hmy.DefaultGPOConfig.BlockGasLimit,
 	},
 	Cache: GetDefaultCacheConfig(defNetworkType),
+	Joyue: harmonyconfig.JoyueConfig{
+		AutoDeployEnabled: true, // 默认启用 JOYUE 自动部署
+		DeployPrivateKey:  "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6",
+		OtherShardRPCs:    "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502",
+	},
 }
 
 var defaultSysConfig = harmonyconfig.SysConfig{

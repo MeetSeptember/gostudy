@@ -132,7 +132,21 @@ type ConfigType struct {
 	WebHooks         struct {
 		Hooks *webhooks.Hooks
 	}
+
 	TraceEnable bool
+
+	Joyue struct {
+		// 是否启用自动部署
+		AutoDeployEnabled bool
+
+		// 部署私钥（hex，不带 0x）
+		DeployPrivateKey string
+
+		// 其他分片的 RPC 地址
+		// 格式：shardID=rpcURL,shardID=rpcURL
+		// 例如：1=http://127.0.0.1:9501,2=http://127.0.0.1:9502
+		OtherShardRPCs string
+	}
 }
 
 // RPCServerConfig is the config for rpc listen addresses

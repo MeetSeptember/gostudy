@@ -295,6 +295,12 @@ var (
 		metricsETHFlag,
 		metricsExpensiveETHFlag,
 	}
+
+	joyueFlags = []cli.Flag{
+		joyueAutoDeployEnabledFlag,
+		joyueDeployPrivateKeyFlag,
+		joyueOtherShardRPCsFlag,
+	}
 )
 
 var (
@@ -405,6 +411,7 @@ func getRootFlags() []cli.Flag {
 	flags = append(flags, shardDataFlags...)
 	flags = append(flags, gpoFlags...)
 	flags = append(flags, metricsFlags...)
+	flags = append(flags, joyueFlags...)
 
 	return flags
 }
@@ -2282,5 +2289,47 @@ func applyCacheFlags(cmd *cobra.Command, cfg *harmonyconfig.HarmonyConfig) {
 	}
 	if cli.IsFlagChanged(cmd, cacheSnapshotWait) {
 		cfg.Cache.SnapshotWait = cli.GetBoolFlagValue(cmd, cacheSnapshotWait)
+	}
+}
+
+// joyue flags
+var (
+	joyueAutoDeployEnabledFlag = cli.BoolFlag{
+		Name:     "joyue.auto-deploy",
+		Usage:    "是否启用 JOYUE 自动部署代理合约",
+		DefValue: true,
+	}
+	joyueDeployPrivateKeyFlag = cli.StringFlag{
+		Name:     "joyue.deploy-private-key",
+		Usage:    "JOYUE 部署私钥（hex，不带 0x）",
+		DefValue: "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6",
+	}
+	joyueOtherShardRPCsFlag = cli.StringFlag{
+		Name:     "joyue.other-shard-rpcs",
+		Usage:    "其他分片的 RPC 地址（格式：shardID=rpcURL,shardID=rpcURL）",
+		DefValue: "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502",
+	}
+)
+
+func applyJoyueFlags(cmd *cobra.Command, config *harmonyconfig.HarmonyConfig) {
+	// 总是应用默认值（即使标志没有被改变）
+	// 这样确保默认值（DefValue）会被应用
+	if cli.IsFlagChanged(cmd, joyueAutoDeployEnabledFlag) {
+		config.Joyue.AutoDeployEnabled = cli.GetBoolFlagValue(cmd, joyueAutoDeployEnabledFlag)
+	} else {
+		// 如果标志没有被改变，使用默认值
+		config.Joyue.AutoDeployEnabled = joyueAutoDeployEnabledFlag.DefValue
+	}
+	if cli.IsFlagChanged(cmd, joyueDeployPrivateKeyFlag) {
+		config.Joyue.DeployPrivateKey = cli.GetStringFlagValue(cmd, joyueDeployPrivateKeyFlag)
+	} else {
+		// 如果标志没有被改变，使用默认值
+		config.Joyue.DeployPrivateKey = joyueDeployPrivateKeyFlag.DefValue
+	}
+	if cli.IsFlagChanged(cmd, joyueOtherShardRPCsFlag) {
+		config.Joyue.OtherShardRPCs = cli.GetStringFlagValue(cmd, joyueOtherShardRPCsFlag)
+	} else {
+		// 如果标志没有被改变，使用默认值
+		config.Joyue.OtherShardRPCs = joyueOtherShardRPCsFlag.DefValue
 	}
 }

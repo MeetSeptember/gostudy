@@ -20,6 +20,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 var sigRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)(?:\(([^)]*)\))?$`)
@@ -211,6 +212,61 @@ func main() {
 	}
 	fmt.Printf("status=%d\n", receipt.Status)
 	fmt.Printf("block=%d\n", receipt.BlockNumber.Uint64())
+
+	// 如果交易失败，尝试获取 revert reason
+	if receipt.Status == 0 {
+		fmt.Printf("\n❌ 交易执行失败\n")
+		fmt.Printf("尝试获取 revert reason...\n")
+
+		// 尝试使用 debug_traceTransaction 获取 revert reason
+		rpcClient, err := rpc.DialContext(ctx2, *rpcURL)
+		if err == nil {
+			defer rpcClient.Close()
+
+			var traceResult interface{}
+			err = rpcClient.CallContext(ctx2, &traceResult, "debug_traceTransaction", signedTx.Hash().Hex(), map[string]interface{}{
+				"tracer": "callTracer",
+			})
+			if err == nil {
+				if traceMap, ok := traceResult.(map[string]interface{}); ok {
+					if errorMsg, ok := traceMap["error"].(string); ok {
+						fmt.Printf("错误信息: %s\n", errorMsg)
+					}
+					if output, ok := traceMap["output"].(string); ok && output != "0x" {
+						// 尝试解析 revert reason
+						if len(output) > 10 {
+							revertData := output[10:] // 跳过 0x 和 4 字节 selector
+							if len(revertData) > 0 {
+								fmt.Printf("Revert data: %s\n", output)
+								// 尝试解码 Error(string)
+								if len(revertData) >= 64 {
+									// 跳过 offset (32 bytes) 和 length (32 bytes)
+									reasonHex := revertData[128:]
+									if len(reasonHex) > 0 {
+										reasonBytes, err := hex.DecodeString(reasonHex)
+										if err == nil {
+											reason := string(reasonBytes)
+											// 移除尾部的 null bytes
+											reason = strings.TrimRight(reason, "\x00")
+											if len(reason) > 0 {
+												fmt.Printf("Revert reason: %s\n", reason)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		fmt.Printf("\n建议检查：\n")
+		fmt.Printf("1. 合约是否已部署：使用 joyue-check-deploy 检查\n")
+		fmt.Printf("2. 合约是否已初始化：调用 initialized() 函数\n")
+		fmt.Printf("3. 参数是否正确：检查 --arg 参数格式\n")
+		fmt.Printf("4. 使用 eth_call 先测试：去掉 --send 参数\n")
+	}
 }
 
 // multiStringFlag 支持重复 --arg
