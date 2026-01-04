@@ -34,7 +34,9 @@ event MasterDeployed(
   address indexed master,
   bytes32 indexed salt,
   bytes agentCreationCode,
-  uint32 masterShardId
+  uint32 masterShardId,
+  address cacheAddr,
+  address rpcOracleAddr
 );
 */
 
@@ -43,7 +45,9 @@ const masterEventABI = `[
     {"indexed":true,"internalType":"address","name":"master","type":"address"},
     {"indexed":true,"internalType":"bytes32","name":"salt","type":"bytes32"},
     {"indexed":false,"internalType":"bytes","name":"agentCreationCode","type":"bytes"},
-    {"indexed":false,"internalType":"uint32","name":"masterShardId","type":"uint32"}
+    {"indexed":false,"internalType":"uint32","name":"masterShardId","type":"uint32"},
+    {"indexed":false,"internalType":"address","name":"cacheAddr","type":"address"},
+    {"indexed":false,"internalType":"address","name":"rpcOracleAddr","type":"address"}
   ],"name":"MasterDeployed","type":"event"}
 ]`
 
@@ -52,6 +56,8 @@ type masterDeployed struct {
 	Salt              common.Hash
 	AgentCreationCode []byte
 	MasterShardID     uint32
+	CacheAddr         common.Address
+	RpcOracleAddr     common.Address
 
 	BlockNumber uint64
 	TxHash      common.Hash
@@ -107,6 +113,12 @@ func main() {
 	}
 	from := new(big.Int).SetUint64(*fromBlock)
 
+	// 调试：打印事件签名
+	fmt.Printf("事件签名: MasterDeployed(address,bytes32,bytes,uint32,address,address)\n")
+	fmt.Printf("事件 Topic0: %s\n", ev.ID.Hex())
+	fmt.Printf("查询区块范围: %d - %d\n", from.Uint64(), to.Uint64())
+	fmt.Printf("\n")
+
 	// FilterLogs：按 topic0 过滤事件
 	q := ethereum.FilterQuery{
 		FromBlock: from,
@@ -118,8 +130,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("FilterLogs 失败: %v", err)
 	}
+
+	// 如果没有找到事件，尝试查询所有日志（用于调试）
 	if len(logs) == 0 {
 		fmt.Println("没有找到 MasterDeployed 事件")
+		fmt.Println("\n尝试查询所有日志（用于调试）...")
+
+		// 查询该合约地址的所有日志
+		if masterFilter != nil {
+			allLogsQuery := ethereum.FilterQuery{
+				FromBlock: from,
+				ToBlock:   to,
+				Addresses: []common.Address{*masterFilter},
+			}
+			allLogs, err := client.FilterLogs(ctx, allLogsQuery)
+			if err == nil {
+				fmt.Printf("找到 %d 条日志（来自合约 %s）\n", len(allLogs), masterFilter.Hex())
+				for i, lg := range allLogs {
+					if i < 5 { // 只显示前 5 条
+						fmt.Printf("  日志 #%d: Topic0=%s, Topics数量=%d\n", i+1, lg.Topics[0].Hex(), len(lg.Topics))
+					}
+				}
+			}
+		}
 		return
 	}
 
@@ -140,6 +173,8 @@ func main() {
 		fmt.Printf("master=%s\n", evt.Master.Hex())
 		fmt.Printf("salt=%s\n", evt.Salt.Hex())
 		fmt.Printf("masterShardId=%d\n", evt.MasterShardID)
+		fmt.Printf("cacheAddr=%s\n", evt.CacheAddr.Hex())
+		fmt.Printf("rpcOracleAddr=%s\n", evt.RpcOracleAddr.Hex())
 		fmt.Printf("agentCreationCodeLen=%d\n", len(evt.AgentCreationCode))
 		fmt.Printf("agentCreationCodeHash=%s\n", codeHash.Hex())
 
@@ -179,8 +214,8 @@ func decodeMasterDeployed(ev abi.Event, lg ethtypes.Log) (*masterDeployed, error
 	if err != nil {
 		return nil, err
 	}
-	if len(vals) != 2 {
-		return nil, fmt.Errorf("non-indexed 字段数量不对: %d", len(vals))
+	if len(vals) != 4 {
+		return nil, fmt.Errorf("non-indexed 字段数量不对: 期望 4 个，实际 %d", len(vals))
 	}
 
 	// agentCreationCode（bytes）
@@ -205,11 +240,41 @@ func decodeMasterDeployed(ev abi.Event, lg ethtypes.Log) (*masterDeployed, error
 		return nil, fmt.Errorf("masterShardId 类型未知: %T", vals[1])
 	}
 
+	// cacheAddr（address）
+	var cacheAddr common.Address
+	switch v := vals[2].(type) {
+	case common.Address:
+		cacheAddr = v
+	case []byte:
+		if len(v) >= 20 {
+			cacheAddr = common.BytesToAddress(v[:20])
+		}
+	default:
+		// 如果解析失败，使用零地址（不是错误）
+		cacheAddr = common.Address{}
+	}
+
+	// rpcOracleAddr（address）
+	var rpcOracleAddr common.Address
+	switch v := vals[3].(type) {
+	case common.Address:
+		rpcOracleAddr = v
+	case []byte:
+		if len(v) >= 20 {
+			rpcOracleAddr = common.BytesToAddress(v[:20])
+		}
+	default:
+		// 如果解析失败，使用零地址（不是错误）
+		rpcOracleAddr = common.Address{}
+	}
+
 	return &masterDeployed{
 		Master:            master,
 		Salt:              salt,
 		AgentCreationCode: agentCode,
 		MasterShardID:     shardID,
+		CacheAddr:         cacheAddr,
+		RpcOracleAddr:     rpcOracleAddr,
 		BlockNumber:       lg.BlockNumber,
 		TxHash:            lg.TxHash,
 	}, nil

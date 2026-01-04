@@ -133,6 +133,7 @@ clean:
 	rm -f ./*.rlp
 	rm -rf ~/rpmbuild
 	rm -f coverage.txt
+	rm -f joyue-tool-contracts.json
 
 distclean: clean
 	make -C $(TOP)/mcl clean

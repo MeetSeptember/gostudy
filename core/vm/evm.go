@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/internal/params"
+	"github.com/harmony-one/harmony/internal/utils"
 	stakingTypes "github.com/harmony-one/harmony/staking/types"
 )
 
@@ -89,6 +90,22 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 		}
 		if evm.chainRules.IsCrossShardXferPrecompile {
 			writeCapablePrecompiles = WriteCapablePrecompiledContractsCrossXfer
+		}
+		// 添加 JOYUE 缓存 precompile 支持（读）
+		if p, ok := PrecompiledContractsJoyue[*contract.CodeAddr]; ok {
+			return RunPrecompiledContract(p, input, contract)
+		}
+		// 添加 JOYUE 缓存 precompile 支持（写）
+		if len(WriteCapablePrecompiledContractsJoyue) > 0 {
+			if p, ok := WriteCapablePrecompiledContractsJoyue[*contract.CodeAddr]; ok {
+				// 调试：记录 precompile 调用
+				utils.Logger().Info().
+					Str("precompileAddr", contract.CodeAddr.Hex()).
+					Int("inputLen", len(input)).
+					Bool("readOnly", readOnly).
+					Msg("[JOYUE] EVM: calling write-capable precompile")
+				return RunWriteCapablePrecompiledContract(p, evm, contract, input, readOnly)
+			}
 		}
 		if p := precompiles[*contract.CodeAddr]; p != nil {
 			if _, ok := p.(*vrf); ok {
@@ -322,6 +339,21 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		}
 		if evm.chainRules.IsCrossShardXferPrecompile {
 			writeCapablePrecompiles = WriteCapablePrecompiledContractsCrossXfer
+		}
+		// 添加 JOYUE 缓存 precompile 支持（写）
+		if len(WriteCapablePrecompiledContractsJoyue) > 0 {
+			if writeCapablePrecompiles == nil {
+				writeCapablePrecompiles = make(map[common.Address]WriteCapablePrecompiledContract)
+			}
+			for addr, p := range WriteCapablePrecompiledContractsJoyue {
+				writeCapablePrecompiles[addr] = p
+			}
+		}
+		// 添加 JOYUE 缓存 precompile 支持（读）
+		if len(PrecompiledContractsJoyue) > 0 {
+			for addr, p := range PrecompiledContractsJoyue {
+				precompiles[addr] = p
+			}
 		}
 		if (len(writeCapablePrecompiles) == 0 || writeCapablePrecompiles[addr] == nil) && precompiles[addr] == nil && evm.ChainConfig().IsS3(evm.EpochNumber) && value.Sign() == 0 {
 			// Calling a non existing account, don't do anything, but ping the tracer

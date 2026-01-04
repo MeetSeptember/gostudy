@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"math/rand"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -26,6 +29,7 @@ import (
 	"github.com/harmony-one/harmony/core"
 	"github.com/harmony-one/harmony/core/types"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
+	"github.com/harmony-one/harmony/internal/joyue"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/p2p"
 	"github.com/harmony-one/harmony/shard"
@@ -125,6 +129,15 @@ func (consensus *Consensus) postConsensusProcessing(newBlock *types.Block) error
 		go checkAndDeployAgents(consensus, newBlock)
 	}
 
+	// 处理 JOYUE P2P 缓存广播
+	cacheBroadcaster := joyue.GetGlobalCacheBroadcaster()
+	if cacheBroadcaster != nil {
+		receipts := consensus.Blockchain().GetReceiptsByHash(newBlock.Hash())
+		if receipts != nil {
+			cacheBroadcaster.ProcessBlockLogs(newBlock, receipts)
+		}
+	}
+
 	return nil
 }
 
@@ -166,6 +179,8 @@ type masterDeployedEvent struct {
 	Salt              [32]byte
 	AgentCreationCode []byte
 	MasterShardID     uint32
+	CacheAddr         common.Address
+	RpcOracleAddr     common.Address
 }
 
 // triggerAgentDeployment 从事件中解析 agentCreationCode，然后向其他分片发送部署交易
@@ -229,10 +244,13 @@ func triggerAgentDeployment(
 // parseMasterDeployedEvent 从 logs 中解析 MasterDeployed 事件
 func parseMasterDeployedEvent(logs []*types.Log) (*masterDeployedEvent, error) {
 	// MasterDeployed 事件的签名（完整的 hash，32 字节）
-	masterDeployedSig := common.BytesToHash(crypto.Keccak256([]byte("MasterDeployed(address,bytes32,bytes,uint32)")))
+	// 注意：事件签名不包含 indexed 修饰符，只包含参数类型
+	masterDeployedSig := common.BytesToHash(crypto.Keccak256([]byte("MasterDeployed(address,bytes32,bytes,uint32,address,address)")))
 
 	// 定义事件 ABI（用于解析）
-	eventABI := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"master","type":"address"},{"indexed":true,"name":"salt","type":"bytes32"},{"indexed":false,"name":"agentCreationCode","type":"bytes"},{"indexed":false,"name":"masterShardId","type":"uint32"}],"name":"MasterDeployed","type":"event"}]`
+	// indexed: master, salt
+	// non-indexed: agentCreationCode, masterShardId, cacheAddr, rpcOracleAddr
+	eventABI := `[{"anonymous":false,"inputs":[{"indexed":true,"name":"master","type":"address"},{"indexed":true,"name":"salt","type":"bytes32"},{"indexed":false,"name":"agentCreationCode","type":"bytes"},{"indexed":false,"name":"masterShardId","type":"uint32"},{"indexed":false,"name":"cacheAddr","type":"address"},{"indexed":false,"name":"rpcOracleAddr","type":"address"}],"name":"MasterDeployed","type":"event"}]`
 
 	parsedABI, err := abi.JSON(strings.NewReader(eventABI))
 	if err != nil {
@@ -260,14 +278,14 @@ func parseMasterDeployedEvent(logs []*types.Log) (*masterDeployedEvent, error) {
 		}
 		copy(result.Salt[:], log.Topics[2].Bytes())
 
-		// 非 indexed：agentCreationCode(bytes) + masterShardId(uint32)
+		// 非 indexed：agentCreationCode(bytes) + masterShardId(uint32) + cacheAddr(address) + rpcOracleAddr(address)
 		vals, err := evt.Inputs.NonIndexed().Unpack(log.Data)
 		if err != nil {
 			utils.Logger().Error().Err(err).Msg("[JOYUE] failed to unpack MasterDeployed event data")
 			continue
 		}
-		if len(vals) != 2 {
-			utils.Logger().Warn().Int("valsCount", len(vals)).Msg("[JOYUE] unexpected number of unpacked values")
+		if len(vals) != 4 {
+			utils.Logger().Warn().Int("valsCount", len(vals)).Msg("[JOYUE] unexpected number of unpacked values, expected 4")
 			continue
 		}
 
@@ -294,6 +312,32 @@ func parseMasterDeployedEvent(logs []*types.Log) (*masterDeployedEvent, error) {
 			result.MasterShardID = uint32(v.Uint64())
 		default:
 			continue
+		}
+
+		// cacheAddr
+		switch v := vals[2].(type) {
+		case common.Address:
+			result.CacheAddr = v
+		case []byte:
+			if len(v) >= 20 {
+				result.CacheAddr = common.BytesToAddress(v[:20])
+			}
+		default:
+			// 如果解析失败，使用零地址（不是错误）
+			result.CacheAddr = common.Address{}
+		}
+
+		// rpcOracleAddr
+		switch v := vals[3].(type) {
+		case common.Address:
+			result.RpcOracleAddr = v
+		case []byte:
+			if len(v) >= 20 {
+				result.RpcOracleAddr = common.BytesToAddress(v[:20])
+			}
+		default:
+			// 如果解析失败，使用零地址（不是错误）
+			result.RpcOracleAddr = common.Address{}
 		}
 
 		return result, nil
@@ -435,6 +479,21 @@ func deployAgentToShard(
 		return
 	}
 
+	// 3.5. 检查合约是否已经部署（通过计算地址并检查代码）
+	// 合约地址 = crypto.CreateAddress(from, nonce)
+	expectedAgentAddr := crypto.CreateAddress(from, nonce)
+	code, err := client.CodeAt(ctx, expectedAgentAddr, nil)
+	if err == nil && len(code) > 0 {
+		// 合约已部署，跳过
+		utils.Logger().Info().
+			Uint32("shard", shardID).
+			Str("agent", expectedAgentAddr.Hex()).
+			Str("master", masterAddr.Hex()).
+			Int("codeLen", len(code)).
+			Msg("[JOYUE] agent contract already deployed, skipping")
+		return
+	}
+
 	// 4. 获取 gas price
 	gasPrice, err := client.SuggestGasPrice(ctx)
 	if err != nil {
@@ -455,10 +514,19 @@ func deployAgentToShard(
 		return
 	}
 
-	// 6. 构造包含构造函数参数的完整 creation code
+	// 6. 从配置文件读取工具合约地址
+	cacheAddr, rpcOracleAddr, err := loadToolContractAddresses(shardID)
+	if err != nil {
+		utils.Logger().Warn().Err(err).Uint32("shard", shardID).Msg("[JOYUE] failed to load tool contract addresses, using zero addresses")
+		// 如果读取失败，使用零地址（测试功能将不可用）
+		cacheAddr = common.Address{}
+		rpcOracleAddr = common.Address{}
+	}
+
+	// 7. 构造包含构造函数参数的完整 creation code
 	// agentCreationCode 是纯 bytecode（不含构造函数参数）
-	// 需要添加构造函数参数：constructor(address master_, uint32 masterShardId_, uint32 agentShardId_)
-	agentCreationCodeWithCtor, err := packAgentConstructorArgs(agentCreationCode, masterAddr, masterShardID, shardID)
+	// 需要添加构造函数参数：constructor(address master_, uint32 masterShardId_, uint32 agentShardId_, address cacheAddr_, address rpcOracleAddr_)
+	agentCreationCodeWithCtor, err := packAgentConstructorArgs(agentCreationCode, masterAddr, masterShardID, shardID, cacheAddr, rpcOracleAddr)
 	if err != nil {
 		utils.Logger().Error().Err(err).Uint32("shard", shardID).Msg("[JOYUE] failed to pack agent constructor args")
 		return
@@ -508,6 +576,35 @@ func deployAgentToShard(
 	var rpcTxHash common.Hash
 	err = rpcClient.CallContext(ctx, &rpcTxHash, "eth_sendRawTransaction", hexutil.Encode(txBytes))
 	if err != nil {
+		// 检查是否是 "known transaction" 错误（幂等性：交易已存在）
+		errStr := err.Error()
+		if strings.Contains(errStr, "known transaction") || strings.Contains(errStr, "already known") {
+			// 这是幂等性错误，交易已经存在，视为成功
+			utils.Logger().Info().
+				Uint32("shard", shardID).
+				Str("txHash", txHash.Hex()).
+				Str("master", masterAddr.Hex()).
+				Msg("[JOYUE] agent deployment tx already exists (idempotent)")
+			// 验证交易是否真的存在
+			_, err := client.TransactionReceipt(ctx, txHash)
+			if err == nil {
+				// 交易已确认，成功
+				utils.Logger().Info().
+					Uint32("shard", shardID).
+					Str("txHash", txHash.Hex()).
+					Str("master", masterAddr.Hex()).
+					Msg("[JOYUE] agent deployment tx confirmed")
+				return
+			}
+			// 交易在交易池中，也视为成功
+			utils.Logger().Info().
+				Uint32("shard", shardID).
+				Str("txHash", txHash.Hex()).
+				Str("master", masterAddr.Hex()).
+				Msg("[JOYUE] agent deployment tx in pool")
+			return
+		}
+		// 其他错误才视为失败
 		utils.Logger().Error().Err(err).Uint32("shard", shardID).Str("txHash", txHash.Hex()).Str("master", masterAddr.Hex()).Msg("[JOYUE] failed to send agent deployment tx")
 		return
 	}
@@ -556,13 +653,15 @@ func createEthContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, g
 }
 
 // packAgentConstructorArgs 将构造函数参数编码并拼接到 agent bytecode 后面
-// 构造函数签名：constructor(address master_, uint32 masterShardId_, uint32 agentShardId_)
+// 构造函数签名：constructor(address master_, uint32 masterShardId_, uint32 agentShardId_, address cacheAddr_, address rpcOracleAddr_)
 // 返回：agentBytecode || ABI编码的构造函数参数
 func packAgentConstructorArgs(
 	agentBytecode []byte,
 	masterAddr common.Address,
 	masterShardID uint32,
 	agentShardID uint32,
+	cacheAddr common.Address,
+	rpcOracleAddr common.Address,
 ) ([]byte, error) {
 	// 定义构造函数参数类型
 	tAddress, err := abi.NewType("address", "", nil)
@@ -574,15 +673,17 @@ func packAgentConstructorArgs(
 		return nil, fmt.Errorf("failed to create uint32 type: %w", err)
 	}
 
-	// 构造 ABI 参数列表
+	// 构造 ABI 参数列表：5 个参数
 	args := abi.Arguments{
-		{Type: tAddress},
-		{Type: tUint32},
-		{Type: tUint32},
+		{Type: tAddress}, // master_
+		{Type: tUint32},  // masterShardId_
+		{Type: tUint32},  // agentShardId_
+		{Type: tAddress}, // cacheAddr_
+		{Type: tAddress}, // rpcOracleAddr_
 	}
 
 	// 编码构造函数参数
-	ctorArgs, err := args.Pack(masterAddr, masterShardID, agentShardID)
+	ctorArgs, err := args.Pack(masterAddr, masterShardID, agentShardID, cacheAddr, rpcOracleAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack constructor args: %w", err)
 	}
@@ -592,10 +693,67 @@ func packAgentConstructorArgs(
 	return creationCode, nil
 }
 
+// =========================
+// 工具合约地址配置管理
+// =========================
+
+// toolContractsConfig 工具合约地址配置
+type toolContractsConfig struct {
+	Shards map[string]shardToolContracts `json:"shards"`
+}
+
+// shardToolContracts 单个分片的工具合约地址
+type shardToolContracts struct {
+	CacheAddr     string            `json:"cacheAddr,omitempty"`     // JoyueMockCache 地址（必需）
+	RpcOracleAddr string            `json:"rpcOracleAddr,omitempty"` // JoyueRpcOracleMock 地址（必需）
+	Contracts     map[string]string `json:"contracts,omitempty"`     // 其他工具合约地址映射：contractType -> address
+}
+
+// loadToolContractAddresses 从配置文件加载工具合约地址
+// 配置文件路径：joyue-tool-contracts.json（相对于工作目录）
+func loadToolContractAddresses(shardID uint32) (cacheAddr, rpcOracleAddr common.Address, err error) {
+	configPath := "joyue-tool-contracts.json"
+
+	data, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，返回零地址（不是错误）
+			utils.Logger().Debug().Uint32("shard", shardID).Str("config", configPath).Msg("[JOYUE] tool contracts config file not found, using zero addresses")
+			return common.Address{}, common.Address{}, nil
+		}
+		return common.Address{}, common.Address{}, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+
+	var config toolContractsConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return common.Address{}, common.Address{}, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+
+	shardKey := strconv.FormatUint(uint64(shardID), 10)
+	shardConfig, exists := config.Shards[shardKey]
+	if !exists {
+		// 该分片没有配置，返回零地址（不是错误）
+		utils.Logger().Debug().Uint32("shard", shardID).Str("shardKey", shardKey).Msg("[JOYUE] no tool contract addresses found for shard, using zero addresses")
+		return common.Address{}, common.Address{}, nil
+	}
+
+	if shardConfig.CacheAddr != "" {
+		cacheAddr = common.HexToAddress(shardConfig.CacheAddr)
+		utils.Logger().Debug().Uint32("shard", shardID).Str("cacheAddr", cacheAddr.Hex()).Msg("[JOYUE] loaded cache contract address")
+	}
+	if shardConfig.RpcOracleAddr != "" {
+		rpcOracleAddr = common.HexToAddress(shardConfig.RpcOracleAddr)
+		utils.Logger().Debug().Uint32("shard", shardID).Str("rpcOracleAddr", rpcOracleAddr.Hex()).Msg("[JOYUE] loaded RPC oracle contract address")
+	}
+
+	return cacheAddr, rpcOracleAddr, nil
+}
+
 // 通过事件识别 JoyueMaster 合约
 func isJoyueMaster(logs []*types.Log) bool {
 	// MasterDeployed 事件的 topic0（完整的 hash，32 字节）
-	masterDeployedSig := common.BytesToHash(crypto.Keccak256([]byte("MasterDeployed(address,bytes32,bytes,uint32)")))
+	// 注意：事件签名不包含 indexed 修饰符，只包含参数类型
+	masterDeployedSig := common.BytesToHash(crypto.Keccak256([]byte("MasterDeployed(address,bytes32,bytes,uint32,address,address)")))
 	for _, log := range logs {
 		if len(log.Topics) > 0 && log.Topics[0] == masterDeployedSig {
 			return true

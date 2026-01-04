@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -401,15 +402,38 @@ func parseOne(typ string, s string) (interface{}, error) {
 		return decodeHexBytes(s)
 	}
 	if strings.HasPrefix(typ, "bytes") && typ != "bytes" {
-		// bytesN（如 bytes32）
+		// bytesN（如 bytes32）- 需要固定长度的数组，不是 slice
 		b, err := decodeHexBytes(s)
 		if err != nil {
 			return nil, err
 		}
-		return b, nil
+		// 解析 bytesN 中的 N
+		var n int
+		if typ == "bytes32" {
+			n = 32
+		} else if strings.HasPrefix(typ, "bytes") {
+			// 尝试解析 bytesN 中的 N
+			if _, err := fmt.Sscanf(typ, "bytes%d", &n); err != nil {
+				return nil, fmt.Errorf("无法解析 bytesN 类型: %s", typ)
+			}
+		}
+		// 确保长度正确
+		if len(b) > n {
+			return nil, fmt.Errorf("bytes%d 参数太长: 期望 %d 字节，实际 %d 字节", n, n, len(b))
+		}
+		// bytes32 使用 common.Hash（它是 [32]byte 的别名）
+		if n == 32 {
+			var hash common.Hash
+			copy(hash[:], b)
+			return hash, nil
+		}
+		// 对于其他 bytesN，使用反射创建固定长度数组
+		// 但为了简化，我们只支持常见的长度
+		// 使用 reflect 创建固定长度数组
+		return createFixedBytesArray(n, b)
 	}
 	if strings.HasPrefix(typ, "uint") || strings.HasPrefix(typ, "int") {
-		// 统一用 big.Int 承接（abi pack 会按类型截断/检查）
+		// 解析数值
 		z := new(big.Int)
 		// 允许 0x 前缀
 		if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
@@ -418,12 +442,35 @@ func parseOne(typ string, s string) (interface{}, error) {
 				return nil, err
 			}
 			z.SetBytes(b)
+		} else {
+			if _, ok := z.SetString(s, 10); !ok {
+				return nil, errors.New("整数参数解析失败（需要十进制或 0x 十六进制）")
+			}
+		}
+
+		// 根据具体类型返回对应的值（而不是统一返回 *big.Int）
+		// abi.Pack 需要具体的类型，不能是 *big.Int
+		switch typ {
+		case "uint8":
+			return uint8(z.Uint64()), nil
+		case "uint16":
+			return uint16(z.Uint64()), nil
+		case "uint32":
+			return uint32(z.Uint64()), nil
+		case "uint64":
+			return z.Uint64(), nil
+		case "int8":
+			return int8(z.Int64()), nil
+		case "int16":
+			return int16(z.Int64()), nil
+		case "int32":
+			return int32(z.Int64()), nil
+		case "int64":
+			return z.Int64(), nil
+		default:
+			// 对于其他 uint/int 类型（如 uint256），返回 *big.Int
 			return z, nil
 		}
-		if _, ok := z.SetString(s, 10); !ok {
-			return nil, errors.New("整数参数解析失败（需要十进制或 0x 十六进制）")
-		}
-		return z, nil
 	}
 	return nil, fmt.Errorf("暂不支持的类型：%s（你可以改用 --data 传完整 calldata）", typ)
 }
@@ -437,6 +484,20 @@ func decodeHexBytes(s string) ([]byte, error) {
 		s = "0" + s
 	}
 	return hex.DecodeString(s)
+}
+
+// createFixedBytesArray 创建固定长度的字节数组
+func createFixedBytesArray(n int, b []byte) (interface{}, error) {
+	// 使用反射创建固定长度数组
+	arrType := reflect.ArrayOf(n, reflect.TypeOf(byte(0)))
+	arrValue := reflect.New(arrType).Elem()
+
+	// 复制数据
+	for i := 0; i < n && i < len(b); i++ {
+		arrValue.Index(i).Set(reflect.ValueOf(b[i]))
+	}
+
+	return arrValue.Interface(), nil
 }
 
 func waitForReceipt(ctx context.Context, client *ethclient.Client, txHash common.Hash) (*ethtypes.Receipt, error) {

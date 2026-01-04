@@ -56,6 +56,10 @@ type JoyueConfig struct {
 	// 格式：shardID=rpcURL,shardID=rpcURL
 	// 例如：1=http://127.0.0.1:9501,2=http://127.0.0.1:9502
 	OtherShardRPCs string `toml:"other_shard_rpcs"`
+
+	// 工具合约地址配置文件路径（绝对路径或相对于工作目录）
+	// 默认：joyue-tool-contracts.json
+	ToolContractsConfigPath string `toml:"tool_contracts_config_path"`
 }
 
 func (hc HarmonyConfig) ToRPCServerConfig() nodeconfig.RPCServerConfig {

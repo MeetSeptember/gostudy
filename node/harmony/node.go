@@ -25,6 +25,7 @@ import (
 	"github.com/harmony-one/harmony/crypto/bls"
 	harmonyconfig "github.com/harmony-one/harmony/internal/configs/harmony"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
+	"github.com/harmony-one/harmony/internal/joyue"
 	"github.com/harmony-one/harmony/internal/params"
 	"github.com/harmony-one/harmony/internal/registry"
 	"github.com/harmony-one/harmony/internal/shardchain/tikv_manage"
@@ -1056,6 +1057,26 @@ func New(
 
 		node.deciderCache, _ = lru.New(16)
 		node.committeeCache, _ = lru.New(16)
+
+		// 初始化 JOYUE P2P 缓存广播器
+		cacheBroadcaster, err := joyue.NewCacheBroadcaster(host, node.NodeConfig)
+		if err != nil {
+			utils.Logger().Error().Err(err).Msg("[JOYUE] failed to create cache broadcaster")
+		} else {
+			// 设置为全局访问器（供 precompile 使用）
+			joyue.SetGlobalCacheBroadcaster(cacheBroadcaster)
+			utils.Logger().Info().Msg("[JOYUE] cache broadcaster initialized")
+		}
+
+		// 初始化 JOYUE RPC Oracle
+		rpcOracle, err := joyue.NewRpcOracle(node.NodeConfig)
+		if err != nil {
+			utils.Logger().Error().Err(err).Msg("[JOYUE] failed to create RPC oracle")
+		} else {
+			// 设置为全局访问器（供 precompile 使用）
+			joyue.SetGlobalRpcOracle(rpcOracle)
+			utils.Logger().Info().Msg("[JOYUE] RPC oracle initialized")
+		}
 		node.Consensus.VerifiedNewBlock = make(chan *types.Block, 1)
 		// the sequence number is the next block number to be added in consensus protocol, which is
 		// always one more than current chain header block
