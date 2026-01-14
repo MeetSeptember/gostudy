@@ -30,8 +30,8 @@ Master 合约构造函数签名：
 - salt: 预留字段
 - agentCreationCode: 完整的 Agent creation code（不含构造函数参数）
 - masterShardId: Master 分片 ID
-- cacheAddr: JoyueMockCache 合约地址（必须是 Master 合约所在分片的地址）
-- rpcOracleAddr: JoyueRpcOracleMock 合约地址（必须是 Master 合约所在分片的地址）
+- cacheAddr: JoyueCache 合约地址（必须是 Master 合约所在分片的地址）
+- rpcOracleAddr: JoyueRpcOracle 合约地址（必须是 Master 合约所在分片的地址）
 
 重要提示：
 1. cacheAddr 和 rpcOracleAddr 必须是 Master 合约所在分片的地址（因为 EVM 调用不能跨分片）
@@ -75,8 +75,8 @@ func main() {
 		saltHex = flag.String("salt", "0x0", "bytes32 salt（0x... 或不带 0x；不足 32 字节左侧补 0）")
 		shardID = flag.Uint64("master-shard-id", 0, "masterShardId（写入事件，默认 0）")
 
-		cacheAddrHex     = flag.String("cache-addr", "0x0", "JoyueMockCache 合约地址（Master 合约所在分片的地址，可选，默认 0x0）")
-		rpcOracleAddrHex = flag.String("rpc-oracle-addr", "0x0", "JoyueRpcOracleMock 合约地址（Master 合约所在分片的地址，可选，默认 0x0）")
+		cacheAddrHex     = flag.String("cache-addr", "0x0", "JoyueCache 合约地址（Master 合约所在分片的地址，可选，默认 0x0）")
+		rpcOracleAddrHex = flag.String("rpc-oracle-addr", "0x0", "JoyueRpcOracle 合约地址（Master 合约所在分片的地址，可选，默认 0x0）")
 
 		gasLimit   = flag.Uint64("gas", 3_500_000, "gasLimit")
 		gasTipGwei = flag.Int64("gas-tip-gwei", 1, "EIP-1559 priority fee（gwei），仅在 baseFee 存在时使用")

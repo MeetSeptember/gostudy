@@ -50,9 +50,16 @@ func RunWriteCapablePrecompiledContract(
 	input []byte,
 	readOnly bool,
 ) ([]byte, error) {
-	// immediately error out if readOnly
+	// Check if this precompile allows read-only execution
+	// Some precompiles (like getCurrentShardID) are read-only but need EVM context
 	if readOnly {
-		return nil, errWriteProtection
+		// Special case: allow joyueCurrentShardPrecompile (0x6C) to run in read-only mode
+		// because it only reads evm.Context.ShardID and doesn't modify state
+		if contract.CodeAddr != nil && *contract.CodeAddr == common.BytesToAddress([]byte{108}) {
+			// Allow execution for getCurrentShardID precompile
+		} else {
+			return nil, errWriteProtection
+		}
 	}
 	gas, err := p.RequiredGas(evm, contract, input)
 	if err != nil {

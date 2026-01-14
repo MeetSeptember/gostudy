@@ -4,7 +4,7 @@ pragma solidity >=0.4.22;
 import "./JoyueLib.sol";
 
 /**
- * @title JoyueMockCache
+ * @title JoyueCache
  * @dev P2P 缓存访问合约。通过 precompile 访问和修改节点层面的 P2P 缓存。
  *
  * 工作流程：
@@ -24,7 +24,7 @@ import "./JoyueLib.sol";
  * - 代理合约的缓存修改只更新本地节点缓存，不广播
  * - 主合约的状态修改会 emit StateBroadcast 事件，节点会广播到其他节点
  */
-contract JoyueMockCache is IJoyueCache, IJoyueCacheWriter {
+contract JoyueCache is IJoyueCache, IJoyueCacheWriter {
     // Precompile 地址：读缓存 (0x64 = 100)
     address private constant JOYUE_CACHE_PRECOMPILE_READ = address(0x64);
     // Precompile 地址：写缓存 (0x65 = 101)
@@ -40,7 +40,9 @@ contract JoyueMockCache is IJoyueCache, IJoyueCacheWriter {
      */
     function get(address contractAddr, bytes32 key) external view returns (bytes memory value, uint64 version, bool ok) {
         // 从 precompile 获取（P2P 缓存）
-        (bool success, bytes memory result) = JOYUE_CACHE_PRECOMPILE_READ.staticcall(
+        bool success;
+        bytes memory result;
+        (success, result) = JOYUE_CACHE_PRECOMPILE_READ.staticcall(
             abi.encodePacked(contractAddr, key)
         );
 

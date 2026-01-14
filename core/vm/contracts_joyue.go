@@ -7,6 +7,8 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/harmony-one/harmony/core/types"
+	"github.com/harmony-one/harmony/crypto/hash"
 	joyue "github.com/harmony-one/harmony/internal/joyue"
 	"github.com/harmony-one/harmony/internal/params"
 	"github.com/harmony-one/harmony/internal/utils"
@@ -43,7 +45,11 @@ var PrecompiledContractsJoyue = map[common.Address]PrecompiledContract{
 
 // WriteCapablePrecompiledContractsJoyue 包含 JOYUE 相关的可写 precompile
 var WriteCapablePrecompiledContractsJoyue = map[common.Address]WriteCapablePrecompiledContract{
-	common.BytesToAddress([]byte{101}): &joyueCacheWritePrecompile{}, // 0x65 = 101 (写缓存)
+	common.BytesToAddress([]byte{101}): &joyueCacheWritePrecompile{},      // 0x65 = 101 (写缓存)
+	common.BytesToAddress([]byte{108}): &joyueCurrentShardPrecompile{},    // 0x6C = 108 (获取当前分片 ID，虽然是只读但需要 EVM 上下文)
+	common.BytesToAddress([]byte{109}): &joyueRpcOracleSendTxPrecompile{}, // 0x6D = 109 (RPC Oracle 发送交易)
+	// 注释掉批量发送 precompile，改为串行调用以避免并发数据库访问问题
+	// common.BytesToAddress([]byte{110}): &joyueRpcOracleSendTxBatchPrecompile{}, // 0x6E = 110 (RPC Oracle 批量发送交易)
 }
 
 // joyueCachePrecompile 实现 P2P 缓存访问的 precompile
@@ -374,4 +380,281 @@ func (c *joyueRpcOraclePrecompile) Run(input []byte) ([]byte, error) {
 func encodeRpcOracleResult(value []byte, version uint64, ok bool) []byte {
 	// 使用与 encodeCacheResult 相同的格式
 	return encodeCacheResult(value, version, ok)
+}
+
+// joyueCurrentShardPrecompile 获取当前分片 ID 的 precompile
+// 注意：虽然是只读操作，但使用 WriteCapable 接口以访问 EVM 上下文
+type joyueCurrentShardPrecompile struct{}
+
+// RequiredGas 返回执行 precompile 所需的 gas
+func (c *joyueCurrentShardPrecompile) RequiredGas(evm *EVM, contract *Contract, input []byte) (uint64, error) {
+	return uint64(50), nil // 简单的查询操作
+}
+
+// RunWriteCapable 执行 precompile，返回当前分片 ID
+func (c *joyueCurrentShardPrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
+	shardID := evm.Context.ShardID
+	result := make([]byte, 32)
+	binary.BigEndian.PutUint32(result[28:32], shardID)
+	return result, nil
+}
+
+// joyueRpcOracleSendTxPrecompile 通过 RPC 发送交易的 precompile
+type joyueRpcOracleSendTxPrecompile struct{}
+
+// RequiredGas 返回执行 precompile 所需的 gas
+func (c *joyueRpcOracleSendTxPrecompile) RequiredGas(evm *EVM, contract *Contract, input []byte) (uint64, error) {
+	// 基础 gas + 输入数据 gas
+	// input = 4 bytes (shardID) + 20 bytes (to) + 32 bytes (value) + 4 bytes (calldataLen) + calldata
+	baseGas := uint64(5000) // 发送交易需要更多 gas（网络 I/O + 签名）
+	dataGas := uint64(len(input)+31) / 32 * params.IdentityPerWordGas
+	return baseGas + dataGas, nil
+}
+
+// RunWriteCapable 执行 precompile，通过 RPC 发送交易到其他分片
+func (c *joyueRpcOracleSendTxPrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
+	// 输入格式：4 bytes (shardID) + 20 bytes (to) + 32 bytes (value) + 4 bytes (calldataLen) + calldata
+	if len(input) < 60 {
+		return nil, errors.New("JOYUE: invalid input length for RPC send transaction")
+	}
+
+	// 解析参数
+	shardID := binary.BigEndian.Uint32(input[0:4])
+	to := common.BytesToAddress(input[4:24])
+	value := new(big.Int).SetBytes(input[24:56])
+	calldataLen := binary.BigEndian.Uint32(input[56:60])
+	if len(input) < int(60+calldataLen) {
+		return nil, errors.New("JOYUE: invalid calldata length")
+	}
+	calldata := input[60 : 60+calldataLen]
+
+	// 方案二：Event + Relayer
+	// 发出事件而不是直接发送 RPC，由 Relayer 监听事件并发送交易
+
+	// 生成唯一的 requestId（基于交易哈希和调用者地址）
+	// 使用 txHash + caller + 当前 log index 生成唯一 ID
+	txHash := evm.StateDB.TxHash()
+	caller := contract.CallerAddress
+	logIndex := evm.StateDB.TxIndex()
+
+	// 生成 requestId：keccak256(txHash + caller + logIndex + calldata[:32])
+	requestIdData := append(txHash.Bytes(), caller.Bytes()...)
+	requestIdData = append(requestIdData, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(requestIdData[len(requestIdData)-4:], uint32(logIndex))
+	if len(calldata) > 0 {
+		calldataLen := len(calldata)
+		if calldataLen > 32 {
+			calldataLen = 32
+		}
+		requestIdData = append(requestIdData, calldata[:calldataLen]...)
+	}
+	requestIdHash := hash.Keccak256Hash(requestIdData)
+	requestId := new(big.Int).SetBytes(requestIdHash[:]).Uint64()
+
+	// 从 calldata 中提取 callbackAddr 和 callbackSelector（如果存在）
+	// 注意：当前实现假设 calldata 是 executor.executeAndCallback 的调用
+	// 格式：function signature (4 bytes) + params...
+	// executeAndCallback(uint32 sourceShardID, address callbackAddr, bytes4 callbackSelector, uint256 requestId, address target, uint256 targetValue, bytes targetCalldata)
+	// ABI 编码规则：
+	// - address: 32 bytes，左填充（LeftPad），地址在最后 20 字节 [12:32]
+	// - bytes4: 32 bytes，右填充（RightPad），selector 在前 4 字节 [0:4]
+	// - uint32: 32 bytes，左填充
+	// - uint256: 32 bytes
+	// - bytes: 动态类型，先 offset (32 bytes)，后 length (32 bytes)，再 data
+	var callbackAddr common.Address
+	var callbackSelector [4]byte
+
+	// 尝试从 calldata 解析
+	if len(calldata) >= 4 {
+		// 跳过 function selector (4 bytes)
+		calldataParams := calldata[4:]
+		// 参数布局：
+		// [0:32]   sourceShardID (uint32, 32 bytes)
+		// [32:64]  callbackAddr (address, 32 bytes, 地址在 [44:64])
+		// [64:96]  callbackSelector (bytes4, 32 bytes, selector 在 [64:68])
+		// [96:128] requestId (uint256, 32 bytes)
+		// [128:160] target (address, 32 bytes)
+		// [160:192] targetValue (uint256, 32 bytes)
+		// [192:224] targetCalldata offset (uint256, 32 bytes)
+		// [224:256] targetCalldata length (uint256, 32 bytes)
+		// [256:...] targetCalldata data
+		if len(calldataParams) >= 96 {
+			// callbackAddr: address 类型，32 字节，左填充，地址在最后 20 字节
+			callbackAddr = common.BytesToAddress(calldataParams[44:64]) // [32+12:32+32] = [44:64]
+			// callbackSelector: bytes4 类型，32 字节，右填充，selector 在前 4 字节
+			copy(callbackSelector[:], calldataParams[64:68]) // [64:68]
+		}
+	}
+
+	// 如果无法解析，使用调用者地址作为默认回调地址
+	if callbackAddr == (common.Address{}) {
+		callbackAddr = caller
+		utils.Logger().Warn().
+			Str("caller", caller.Hex()).
+			Msg("[JOYUE] failed to parse callbackAddr from calldata, using caller as default")
+	}
+
+	// 发出 CrossShardRequest 事件
+	// 事件签名：CrossShardRequest(uint256 indexed requestId, uint32 targetShardID, address target, bytes calldata, uint256 value, address callbackAddr, bytes4 callbackSelector)
+	// Topics[0] = keccak256("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)")
+	// Topics[1] = requestId (indexed)
+	// Data = abi.encode(targetShardID, target, calldata, value, callbackAddr, callbackSelector)
+
+	eventSignature := hash.Keccak256Hash([]byte("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)"))
+	requestIdHashForTopic := common.BigToHash(new(big.Int).SetUint64(requestId))
+
+	// 编码事件数据：targetShardID (32 bytes) + target (32 bytes) + calldata (offset + length + data) + value (32 bytes) + callbackAddr (32 bytes) + callbackSelector (32 bytes)
+	// 简化：使用紧凑格式，避免复杂的 ABI 编码
+	// 格式：shardID (4 bytes) + target (20 bytes) + calldataLen (4 bytes) + calldata + value (32 bytes) + callbackAddr (20 bytes) + callbackSelector (4 bytes)
+	eventData := make([]byte, 0, 4+20+4+len(calldata)+32+20+4)
+	eventData = append(eventData, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(eventData[0:4], shardID)
+	eventData = append(eventData, to.Bytes()...)
+	eventData = append(eventData, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(eventData[len(eventData)-4:], uint32(len(calldata)))
+	eventData = append(eventData, calldata...)
+	// value (32 bytes)
+	valueBytes := make([]byte, 32)
+	value.FillBytes(valueBytes)
+	eventData = append(eventData, valueBytes...)
+	// callbackAddr (20 bytes)
+	eventData = append(eventData, callbackAddr.Bytes()...)
+	// callbackSelector (4 bytes)
+	eventData = append(eventData, callbackSelector[:]...)
+
+	// Precompile 地址（0x6D = 109）
+	precompileAddr := common.BytesToAddress([]byte{109})
+
+	// 发出事件
+	evm.StateDB.AddLog(&types.Log{
+		Address:     precompileAddr,
+		Topics:      []common.Hash{eventSignature, requestIdHashForTopic},
+		Data:        eventData,
+		BlockNumber: evm.BlockNumber.Uint64(),
+	})
+
+	utils.Logger().Info().
+		Uint64("requestId", requestId).
+		Uint32("shardID", shardID).
+		Str("to", to.Hex()).
+		Str("callbackAddr", callbackAddr.Hex()).
+		Str("caller", caller.Hex()).
+		Msg("[JOYUE] emitted CrossShardRequest event (Event + Relayer)")
+
+	// 返回 requestId 的哈希（32 bytes），合约可以用这个来追踪请求
+	return requestIdHashForTopic.Bytes(), nil
+}
+
+// joyueRpcOracleSendTxBatchPrecompile 批量发送跨分片交易 precompile
+type joyueRpcOracleSendTxBatchPrecompile struct{}
+
+// RequiredGas 返回执行 precompile 所需的 gas
+func (c *joyueRpcOracleSendTxBatchPrecompile) RequiredGas(evm *EVM, contract *Contract, input []byte) (uint64, error) {
+	// 基础 gas + 每个请求的 gas
+	// input = 4 bytes (count) + [4 bytes (shardID) + 20 bytes (to) + 32 bytes (value) + 4 bytes (calldataLen) + calldata] * count
+	baseGas := uint64(10000) // 批量发送需要更多基础 gas
+	dataGas := uint64(len(input)+31) / 32 * params.IdentityPerWordGas
+	return baseGas + dataGas, nil
+}
+
+// RunWriteCapable 执行批量发送 precompile
+// 输入格式：4 bytes (count) + [4 bytes (shardID) + 20 bytes (to) + 32 bytes (value) + 4 bytes (calldataLen) + calldata] * count
+// 返回格式：abi.encode(bytes32[] txHashes, uint32 successCount)
+func (c *joyueRpcOracleSendTxBatchPrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
+	if len(input) < 4 {
+		return nil, errors.New("JOYUE: invalid input length for batch send")
+	}
+
+	count := binary.BigEndian.Uint32(input[0:4])
+	if count == 0 {
+		// 返回空数组
+		return encodeBatchResult(nil, 0), nil
+	}
+
+	rpcOracle := joyue.GetGlobalRpcOracle()
+	if rpcOracle == nil {
+		return nil, errors.New("JOYUE: RPC oracle not initialized")
+	}
+
+	// 解析所有请求
+	requests := make([]joyue.SendTransactionRequest, 0, count)
+
+	offset := 4
+	for i := uint32(0); i < count; i++ {
+		if len(input) < offset+60 {
+			return nil, fmt.Errorf("JOYUE: invalid request %d: insufficient input", i)
+		}
+
+		shardID := binary.BigEndian.Uint32(input[offset : offset+4])
+		to := common.BytesToAddress(input[offset+4 : offset+24])
+		value := new(big.Int).SetBytes(input[offset+24 : offset+56])
+		calldataLen := binary.BigEndian.Uint32(input[offset+56 : offset+60])
+
+		if len(input) < offset+60+int(calldataLen) {
+			return nil, fmt.Errorf("JOYUE: invalid request %d: calldata length mismatch", i)
+		}
+
+		calldata := input[offset+60 : offset+60+int(calldataLen)]
+
+		requests = append(requests, joyue.SendTransactionRequest{
+			ShardID:  shardID,
+			To:       to,
+			Calldata: calldata,
+			Value:    value,
+		})
+
+		offset += 60 + int(calldataLen)
+	}
+
+	// 批量并发发送
+	txHashes, successCount, err := rpcOracle.SendTransactionBatch(requests)
+	if err != nil {
+		return nil, fmt.Errorf("JOYUE: failed to send batch transactions: %w", err)
+	}
+
+	// 编码返回结果：abi.encode(bytes32[] txHashes, uint32 successCount)
+	return encodeBatchResult(txHashes, successCount), nil
+}
+
+// encodeBatchResult 编码批量发送结果
+// 返回格式：abi.encode(bytes32[] txHashes, uint32 successCount)
+func encodeBatchResult(txHashes []common.Hash, successCount uint32) []byte {
+	// ABI 编码：
+	// - bytes32[]: offset (32 bytes) + length (32 bytes) + data (32 bytes * count)
+	// - uint32: 32 bytes (padded)
+
+	if len(txHashes) == 0 {
+		// 返回空数组 + successCount
+		result := make([]byte, 96)
+		// txHashes offset = 64
+		copy(result[0:32], common.LeftPadBytes(big.NewInt(64).Bytes(), 32))
+		// txHashes length = 0
+		// successCount = 0
+		binary.BigEndian.PutUint32(result[64:68], successCount)
+		return result
+	}
+
+	// 计算 offsets
+	txHashesOffset := uint64(64) // 2 * 32 = 64 (txHashes offset + length)
+
+	// 构建结果
+	result := make([]byte, 0, int(txHashesOffset)+32+len(txHashes)*32)
+
+	// txHashes offset (32 bytes)
+	result = append(result, common.LeftPadBytes(big.NewInt(int64(txHashesOffset)).Bytes(), 32)...)
+
+	// txHashes length (32 bytes)
+	result = append(result, common.LeftPadBytes(big.NewInt(int64(len(txHashes))).Bytes(), 32)...)
+
+	// txHashes data (32 bytes each)
+	for _, txHash := range txHashes {
+		result = append(result, txHash.Bytes()...)
+	}
+
+	// successCount (32 bytes, padded)
+	successCountBytes := make([]byte, 32)
+	binary.BigEndian.PutUint32(successCountBytes[28:32], successCount)
+	result = append(result, successCountBytes...)
+
+	return result
 }

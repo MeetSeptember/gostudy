@@ -2,7 +2,7 @@
 pragma solidity >=0.4.22;
 
 /**
- * @title JoyueRpcOracleMock
+ * @title JoyueRpcOracle
  * @dev RPC Oracle 用于通过 RPC 查询其他分片的主合约权威状态（非缓存）
  *
  * 工作流程：
@@ -16,7 +16,7 @@ pragma solidity >=0.4.22;
  * - 需要配置其他分片的 RPC 地址
  * - 当前实现不考虑安全性，仅实现基本功能
  */
-contract JoyueRpcOracleMock {
+contract JoyueRpcOracle {
     // Precompile 地址：0x0000000000000000000000000000000000000103 (0x67 = 103)
     address private constant JOYUE_RPC_ORACLE_PRECOMPILE = address(0x67);
 
@@ -89,7 +89,9 @@ contract JoyueRpcOracleMock {
             calldata_
         );
 
-        (bool success, bytes memory ret) = JOYUE_RPC_ORACLE_PRECOMPILE.staticcall(input);
+        bool success;
+        bytes memory ret;
+        (success, ret) = JOYUE_RPC_ORACLE_PRECOMPILE.staticcall(input);
 
         if (!success) {
             return "";

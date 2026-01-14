@@ -2,7 +2,7 @@
 pragma solidity >=0.4.22;
 
 import "./JoyueLib.sol";
-import "./JoyueRpcOracleMock.sol";
+import "./JoyueRpcOracle.sol";
 import "./JoyueStorage.sol";
 
 /**
@@ -156,7 +156,8 @@ contract JoyueVerifier is JoyueStorage {
             _prefetch[k] = PrefetchEntry({val: v, ver: ver, has: true});
         } else {
             require(rpcOracle != address(0), "JOYUE: rpcOracle not set");
-            (uint256 v2, uint64 ver2, bool has) = JoyueRpcOracleMock(rpcOracle).getUint(c, key);
+            // todo 这里跨分片调用需要修改
+            (uint256 v2, uint64 ver2, bool has) = JoyueRpcOracle(rpcOracle).getUint(c, key);
             if (has) {
                 _prefetch[k] = PrefetchEntry({val: v2, ver: ver2, has: true});
             }

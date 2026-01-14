@@ -704,8 +704,8 @@ type toolContractsConfig struct {
 
 // shardToolContracts 单个分片的工具合约地址
 type shardToolContracts struct {
-	CacheAddr     string            `json:"cacheAddr,omitempty"`     // JoyueMockCache 地址（必需）
-	RpcOracleAddr string            `json:"rpcOracleAddr,omitempty"` // JoyueRpcOracleMock 地址（必需）
+	CacheAddr     string            `json:"cacheAddr,omitempty"`     // JoyueCache 地址（必需）
+	RpcOracleAddr string            `json:"rpcOracleAddr,omitempty"` // JoyueRpcOracle 地址（必需）
 	Contracts     map[string]string `json:"contracts,omitempty"`     // 其他工具合约地址映射：contractType -> address
 }
 

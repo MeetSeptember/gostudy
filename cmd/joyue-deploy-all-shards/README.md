@@ -26,13 +26,13 @@ go run cmd/joyue-deploy-all-shards/main.go \
 ### 部署工具合约并保存地址
 
 ```bash
-# 部署 JoyueMockCache（会自动保存到配置文件）
+# 部署 JoyueCache（会自动保存到配置文件）
 go run cmd/joyue-deploy-all-shards/main.go \
   --private-key "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6" \
   --shards "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502" \
   --contract-type "cache"
 
-# 部署 JoyueRpcOracleMock（会自动保存到配置文件）
+# 部署 JoyueRpcOracle（会自动保存到配置文件）
 go run cmd/joyue-deploy-all-shards/main.go \
   --private-key "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6" \
   --shards "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502" \
@@ -159,7 +159,7 @@ go run cmd/joyue-deploy-all-shards/main.go \
 ### 1. 部署 JoyueMockCache
 
 ```bash
-# 1. 修改代码中的 embeddedContractBinHex 为 JoyueMockCache 的 bytecode
+# 1. 修改代码中的 embeddedContractBinHex 为 JoyueCache 的 bytecode
 # 2. 部署并保存地址
 go run cmd/joyue-deploy-all-shards/main.go \
   --private-key "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6" \
@@ -171,7 +171,7 @@ go run cmd/joyue-deploy-all-shards/main.go \
 ### 2. 部署 JoyueRpcOracleMock
 
 ```bash
-# 1. 修改代码中的 embeddedContractBinHex 为 JoyueRpcOracleMock 的 bytecode
+# 1. 修改代码中的 embeddedContractBinHex 为 JoyueRpcOracle 的 bytecode
 # 2. 部署并保存地址
 go run cmd/joyue-deploy-all-shards/main.go \
   --private-key "3836e3675817a46abfadd55b5caec4682a06a919377df79924e75cedbd6eedb6" \
