@@ -46,6 +46,9 @@ contract JoyueMaster {
     bytes32 public immutable agentCreationCodeHash;
     uint32 public immutable masterShardId;
 
+    /// @notice 与 Master 同分片的 Agent 地址（用于重试等）。部署同分片 Agent 后手动调用 setAgentOnSameShard 注册
+    address public agentOnSameShard;
+
     // =========================
     // 缓存和状态管理（用于测试）
     // =========================
@@ -71,6 +74,11 @@ contract JoyueMaster {
     mapping(bytes32 => ForwardedResult) private _results;
 
     event ResultAccepted(bytes32 indexed requestId, address indexed sender, uint32 fromShardId);
+
+    /// @notice 注册与 Master 同分片的 Agent 地址。仅在同分片部署 Agent 后手动调用一次
+    function setAgentOnSameShard(address agentAddr) external {
+        agentOnSameShard = agentAddr;
+    }
 
     /**
      * @param salt_ 预留字段

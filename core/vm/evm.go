@@ -17,6 +17,8 @@
 package vm
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -101,10 +103,16 @@ func run(evm *EVM, contract *Contract, input []byte, readOnly bool) ([]byte, err
 				// 调试：记录 precompile 调用
 				utils.Logger().Info().
 					Str("precompileAddr", contract.CodeAddr.Hex()).
+					Str("caller", contract.CallerAddress.Hex()).
 					Int("inputLen", len(input)).
 					Bool("readOnly", readOnly).
 					Msg("[JOYUE] EVM: calling write-capable precompile")
 				return RunWriteCapablePrecompiledContract(p, evm, contract, input, readOnly)
+			} else {
+				// 调试：记录未找到的 precompile
+				utils.Logger().Debug().
+					Str("precompileAddr", contract.CodeAddr.Hex()).
+					Msg("[JOYUE] EVM: precompile not found in WriteCapablePrecompiledContractsJoyue")
 			}
 		}
 		if p := precompiles[*contract.CodeAddr]; p != nil {
@@ -452,6 +460,17 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 // DelegateCall differs from CallCode in the sense that it executes the given address'
 // code with the caller as context and the caller is set to the caller of the caller.
 func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []byte, gas uint64) (ret []byte, leftOverGas uint64, err error) {
+	// 添加日志追踪 delegatecall
+	if len(input) >= 4 {
+		selector := binary.BigEndian.Uint32(input[0:4])
+		utils.Logger().Info().
+			Str("delegateCallAddr", addr.Hex()).
+			Str("caller", caller.Address().Hex()).
+			Str("selector", fmt.Sprintf("0x%08x", selector)).
+			Int("inputLen", len(input)).
+			Msg("[JOYUE EVM] DelegateCall: Starting")
+	}
+
 	if evm.vmConfig.NoRecursion && evm.depth > 0 {
 		return nil, gas, nil
 	}
@@ -467,14 +486,35 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 
 	// Initialise a new contract and make initialise the delegate values
 	contract := NewContract(caller, to, nil, gas).AsDelegate()
-	contract.SetCallCode(&addr, evm.StateDB.GetCodeHash(addr), evm.StateDB.GetCode(addr))
+	codeHash := evm.StateDB.GetCodeHash(addr)
+	code := evm.StateDB.GetCode(addr)
+
+	utils.Logger().Info().
+		Str("delegateCallAddr", addr.Hex()).
+		Str("codeHash", codeHash.Hex()).
+		Int("codeLen", len(code)).
+		Msg("[JOYUE EVM] DelegateCall: Contract code info")
+
+	contract.SetCallCode(&addr, codeHash, code)
 
 	ret, err = run(evm, contract, input, false)
 	if err != nil {
+		utils.Logger().Error().
+			Err(err).
+			Str("delegateCallAddr", addr.Hex()).
+			Str("caller", caller.Address().Hex()).
+			Int("inputLen", len(input)).
+			Msg("[JOYUE EVM] DelegateCall: run failed")
 		evm.StateDB.RevertToSnapshot(snapshot)
 		if err != ErrExecutionReverted {
 			contract.UseGas(contract.Gas)
 		}
+	} else {
+		utils.Logger().Info().
+			Str("delegateCallAddr", addr.Hex()).
+			Str("caller", caller.Address().Hex()).
+			Int("returnDataLen", len(ret)).
+			Msg("[JOYUE EVM] DelegateCall: run succeeded")
 	}
 	return ret, contract.Gas, err
 }

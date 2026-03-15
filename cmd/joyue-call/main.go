@@ -403,10 +403,22 @@ func parseOne(typ string, s string) (interface{}, error) {
 	}
 	if strings.HasPrefix(typ, "bytes") && typ != "bytes" {
 		// bytesN（如 bytes32）- 需要固定长度的数组，不是 slice
-		b, err := decodeHexBytes(s)
-		if err != nil {
-			return nil, err
+		var b []byte
+		var err error
+
+		// 如果输入不是以 0x 开头的十六进制字符串，且是 bytes32，尝试将其作为字符串进行 keccak256 哈希
+		if typ == "bytes32" && !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+			// 尝试作为普通字符串进行 keccak256 哈希（匹配 Solidity 的 keccak256("string")）
+			hash := crypto.Keccak256([]byte(s))
+			b = hash
+		} else {
+			// 否则尝试解析为十六进制
+			b, err = decodeHexBytes(s)
+			if err != nil {
+				return nil, err
+			}
 		}
+
 		// 解析 bytesN 中的 N
 		var n int
 		if typ == "bytes32" {

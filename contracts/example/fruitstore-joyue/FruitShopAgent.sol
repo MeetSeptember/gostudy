@@ -32,17 +32,33 @@ contract FruitShopAgent {
     address public walletMaster;
     address public pointsMaster;
 
+    // 各 Master 所在的分片
+    uint32 public fruitShopMasterShardID;
+    uint32 public walletMasterShardID;
+    uint32 public pointsMasterShardID;
+
     // Pricing constants (example)
     uint256 public constant APPLE_PRICE = 20;
     uint256 public constant BANANA_PRICE = 10;
     uint256 public constant APPLE_POINTS = 5;
     uint256 public constant BANANA_POINTS = 1;
 
-    constructor(address cacheAddr, address fruitShopMasterAddr, address walletMasterAddr, address pointsMasterAddr) {
+    constructor(
+        address cacheAddr,
+        address fruitShopMasterAddr,
+        address walletMasterAddr,
+        address pointsMasterAddr,
+        uint32 fruitShopMasterShardID_,
+        uint32 walletMasterShardID_,
+        uint32 pointsMasterShardID_
+    ) {
         cache = cacheAddr;
         fruitShopMaster = fruitShopMasterAddr;
         walletMaster = walletMasterAddr;
         pointsMaster = pointsMasterAddr;
+        fruitShopMasterShardID = fruitShopMasterShardID_;
+        walletMasterShardID = walletMasterShardID_;
+        pointsMasterShardID = pointsMasterShardID_;
     }
 
     function buyFruit(bytes32 fruitType, uint256 quantity) external returns (bool ok, JoyueLib.Guard[] memory guards, JoyueLib.Delta[] memory deltas) {
@@ -61,16 +77,19 @@ contract FruitShopAgent {
         JoyueLib.JVar memory stock = JoyueLib.loadFromCacheByKey(
             ctx,
             fruitShopMaster,
+            fruitShopMasterShardID,
             FruitShopMaster(fruitShopMaster).stockKey(fruitType)
         );
         JoyueLib.JVar memory balance = JoyueLib.loadFromCacheByKey(
             ctx,
             walletMaster,
+            walletMasterShardID,
             WalletMaster(walletMaster).balanceKey(msg.sender)
         );
         JoyueLib.JVar memory points = JoyueLib.loadFromCacheByKey(
             ctx,
             pointsMaster,
+            pointsMasterShardID,
             PointsMaster(pointsMaster).pointsKey(msg.sender)
         );
 
@@ -102,8 +121,8 @@ contract FruitShopAgent {
             abi.encode(user)
         );
 
-        JoyueLib.JVar memory balance = JoyueLib.loadFromCacheByKey(ctx, walletMaster, WalletMaster(walletMaster).balanceKey(user));
-        JoyueLib.JVar memory points = JoyueLib.loadFromCacheByKey(ctx, pointsMaster, PointsMaster(pointsMaster).pointsKey(user));
+        JoyueLib.JVar memory balance = JoyueLib.loadFromCacheByKey(ctx, walletMaster, walletMasterShardID, WalletMaster(walletMaster).balanceKey(user));
+        JoyueLib.JVar memory points = JoyueLib.loadFromCacheByKey(ctx, pointsMaster, pointsMasterShardID, PointsMaster(pointsMaster).pointsKey(user));
 
         // For demo: override eval by supplying assumed values as ARG tokens (real system can read args)
         bool vip = ctx.expr()

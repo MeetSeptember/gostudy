@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -50,6 +51,7 @@ func main() {
 	var (
 		rpcURL   = flag.String("rpc", "http://127.0.0.1:9500", "RPC URL")
 		contract = flag.String("contract", "", "合约地址（必需）")
+		shardID  = flag.Uint("shard", 0, "合约所在分片 ID（可选，默认 0）")
 		key      = flag.String("key", "", "缓存键（32 字节 hex，不带 0x）")
 		list     = flag.Bool("list", false, "列出合约的所有缓存键")
 	)
@@ -91,7 +93,10 @@ func querySingleCache(ctx context.Context, client *ethclient.Client, contractAdd
 	keyHash := common.BytesToHash(keyBytes)
 
 	// 构造调用数据：contractAddr (20 bytes) + key (32 bytes)
-	input := append(contractAddr.Bytes(), keyHash.Bytes()...)
+	shardBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(shardBytes, uint32(*shardID))
+	input := append(contractAddr.Bytes(), shardBytes...)
+	input = append(input, keyHash.Bytes()...)
 
 	// 调试：确认地址格式
 	fmt.Printf("🔍 查询参数确认:\n")
@@ -183,7 +188,9 @@ func querySingleCache(ctx context.Context, client *ethclient.Client, contractAdd
 // queryAllCache 查询合约的所有缓存
 func queryAllCache(ctx context.Context, client *ethclient.Client, contractAddr common.Address) {
 	// 构造调用数据：contractAddr (20 bytes)
-	input := contractAddr.Bytes()
+	shardBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(shardBytes, uint32(*shardID))
+	input := append(contractAddr.Bytes(), shardBytes...)
 
 	// 调用 precompile
 	precompileAddr := common.HexToAddress(cacheListPrecompileAddr)
@@ -201,27 +208,81 @@ func queryAllCache(ctx context.Context, client *ethclient.Client, contractAddr c
 		return
 	}
 
-	// 解析格式：offset (32) + keysLen (32) + valuesOffset (32) + versionsOffset (32) + keys[] + values[] + versions[]
-	keysLen := new(big.Int).SetBytes(result[32:64]).Uint64()
-	valuesOffset := new(big.Int).SetBytes(result[64:96]).Uint64()
-	versionsOffset := new(big.Int).SetBytes(result[96:128]).Uint64()
+	// 解析格式：keysOffset (32) + valuesOffset (32) + versionsOffset (32) + keys[] + values[] + versions[]
+	// 前 96 字节是三个 offset
+	keysOffset := new(big.Int).SetBytes(result[0:32]).Uint64()
+	valuesOffset := new(big.Int).SetBytes(result[32:64]).Uint64()
+	versionsOffset := new(big.Int).SetBytes(result[64:96]).Uint64()
+
+	// 读取 keys 数组长度（在 keysOffset 位置）
+	keysLen := new(big.Int).SetBytes(result[keysOffset : keysOffset+32]).Uint64()
 
 	fmt.Printf("✅ 找到 %d 个缓存条目\n", keysLen)
 	fmt.Printf("合约地址: %s\n\n", contractAddr.Hex())
 
-	// 解析 keys
-	keysStart := int(versionsOffset)
+	// 解析 keys（从 keysOffset + 32 开始，跳过长度字段）
+	keysStart := int(keysOffset) + 32
 	for i := uint64(0); i < keysLen; i++ {
 		keyOffset := keysStart + int(i)*32
+		if keyOffset+32 > len(result) {
+			fmt.Printf("⚠️  警告：键 #%d 超出结果范围\n", i+1)
+			break
+		}
 		keyHash := common.BytesToHash(result[keyOffset : keyOffset+32])
 
-		// 解析 value
-		valueOffset := int(valuesOffset) + int(i)*32
-		valueBytes := result[valueOffset : valueOffset+32]
-		valueUint := new(big.Int).SetBytes(valueBytes)
+		// 解析 value（values 数组格式：length (32) + offsets[] (每个 32 bytes) + lengths[] (每个 32 bytes) + data[]）
+		// 注意：encodeCacheListResult 中，每个 value 的 offset 指向 value data 的开始位置
+		// value data 只包含实际数据（padded），不包含 offset 和 length
+		valuesArrayStart := int(valuesOffset)
+		valuesLength := new(big.Int).SetBytes(result[valuesArrayStart : valuesArrayStart+32]).Uint64()
+		if i >= valuesLength {
+			fmt.Printf("⚠️  警告：值 #%d 超出范围\n", i+1)
+			break
+		}
+		// 读取第 i 个 value 的 offset（指向 value data 的开始位置）
+		valueOffsetPtr := valuesArrayStart + 32 + int(i)*32
+		if valueOffsetPtr+32 > len(result) {
+			fmt.Printf("⚠️  警告：value offset #%d 超出结果范围\n", i+1)
+			break
+		}
+		valueDataOffset := int(new(big.Int).SetBytes(result[valueOffsetPtr : valueOffsetPtr+32]).Uint64())
+		// 读取第 i 个 value 的 length（在 offsets[] 之后）
+		valueLengthPtr := valuesArrayStart + 32 + int(valuesLength)*32 + int(i)*32
+		if valueLengthPtr+32 > len(result) {
+			fmt.Printf("⚠️  警告：value length #%d 超出结果范围\n", i+1)
+			break
+		}
+		valueLength := int(new(big.Int).SetBytes(result[valueLengthPtr : valueLengthPtr+32]).Uint64())
+		// 边界检查
+		if valueDataOffset < 0 || valueDataOffset >= len(result) {
+			fmt.Printf("⚠️  警告：value data offset #%d 超出范围: %d (结果长度: %d)\n", i+1, valueDataOffset, len(result))
+			break
+		}
+		if valueDataOffset+valueLength > len(result) {
+			fmt.Printf("⚠️  警告：value data #%d 超出范围: offset=%d, length=%d, 结果长度=%d\n", i+1, valueDataOffset, valueLength, len(result))
+			// 只读取能读取的部分
+			valueLength = len(result) - valueDataOffset
+		}
+		// 读取 value data（只包含实际数据，不包含 offset 和 length）
+		valueBytes := result[valueDataOffset : valueDataOffset+valueLength]
+		// 如果 value 是 uint256，转换为 big.Int
+		var valueUint *big.Int
+		if len(valueBytes) >= 32 {
+			valueUint = new(big.Int).SetBytes(valueBytes[:32])
+		} else {
+			paddedValue := make([]byte, 32)
+			copy(paddedValue[32-len(valueBytes):], valueBytes)
+			valueUint = new(big.Int).SetBytes(paddedValue)
+		}
 
-		// 解析 version
-		versionOffset := int(versionsOffset) + 32 + int(i)*32
+		// 解析 version（versions 数组格式：length (32) + versions[] (每个 32 bytes)）
+		versionsArrayStart := int(versionsOffset)
+		versionsLength := new(big.Int).SetBytes(result[versionsArrayStart : versionsArrayStart+32]).Uint64()
+		if i >= versionsLength {
+			fmt.Printf("⚠️  警告：版本 #%d 超出范围\n", i+1)
+			break
+		}
+		versionOffset := versionsArrayStart + 32 + int(i)*32
 		version := new(big.Int).SetBytes(result[versionOffset : versionOffset+32]).Uint64()
 
 		fmt.Printf("条目 #%d:\n", i+1)

@@ -48,6 +48,8 @@ var WriteCapablePrecompiledContractsJoyue = map[common.Address]WriteCapablePreco
 	common.BytesToAddress([]byte{101}): &joyueCacheWritePrecompile{},      // 0x65 = 101 (写缓存)
 	common.BytesToAddress([]byte{108}): &joyueCurrentShardPrecompile{},    // 0x6C = 108 (获取当前分片 ID，虽然是只读但需要 EVM 上下文)
 	common.BytesToAddress([]byte{109}): &joyueRpcOracleSendTxPrecompile{}, // 0x6D = 109 (RPC Oracle 发送交易)
+	common.BytesToAddress([]byte{115}): &joyueCoordinatorPrecompile{},     // 0x73 = 115 (Coordinator)
+	common.BytesToAddress([]byte{116}): &joyueExecutorPrecompile{},        // 0x74 = 116 (Executor)
 	// 注释掉批量发送 precompile，改为串行调用以避免并发数据库访问问题
 	// common.BytesToAddress([]byte{110}): &joyueRpcOracleSendTxBatchPrecompile{}, // 0x6E = 110 (RPC Oracle 批量发送交易)
 }
@@ -58,34 +60,39 @@ type joyueCachePrecompile struct{}
 // RequiredGas 返回执行 precompile 所需的 gas
 func (c *joyueCachePrecompile) RequiredGas(input []byte) uint64 {
 	// 基础 gas + 输入数据 gas
-	// input = 20 bytes (contractAddr) + 32 bytes (key) = 52 bytes
+	// input = 20 bytes (contractAddr) + 4 bytes (shardId) + 32 bytes (key) = 56 bytes
 	baseGas := uint64(100)
 	dataGas := uint64(len(input)+31) / 32 * params.IdentityPerWordGas
 	return baseGas + dataGas
 }
 
-// Run 执行 precompile，返回缓存值
+// Run 执行 precompile，返回可用量（authValue - totalFrozen）
+// 输入格式：紧凑 contractAddr(20)+shardId(4)+key(32)，或 ABI abi.encode(address,uint32,bytes32)(96 bytes)
 func (c *joyueCachePrecompile) Run(input []byte) ([]byte, error) {
-	// 输入格式：20 bytes (contractAddr) + 32 bytes (key)
-	if len(input) < 52 {
+	if len(input) < 56 {
 		return nil, errors.New("JOYUE: invalid input length")
 	}
 
-	// 解析输入
-	contractAddr := common.BytesToAddress(input[0:20])
-	key := common.BytesToHash(input[20:52])
+	var contractAddr common.Address
+	var shardId uint32
+	var key common.Hash
+	if len(input) >= 96 {
+		contractAddr = common.BytesToAddress(input[12:32])
+		shardId = binary.BigEndian.Uint32(input[60:64])
+		key = common.BytesToHash(input[64:96])
+	} else {
+		contractAddr = common.BytesToAddress(input[0:20])
+		shardId = binary.BigEndian.Uint32(input[20:24])
+		key = common.BytesToHash(input[24:56])
+	}
 
-	// 从全局缓存广播器获取缓存
 	cacheBroadcaster := joyue.GetGlobalCacheBroadcaster()
 	if cacheBroadcaster == nil {
-		// 缓存未启用，返回空值
 		return encodeCacheResult(nil, 0, false), nil
 	}
 
-	// 获取缓存值
-	value, version, ok := cacheBroadcaster.GetCache(contractAddr, key)
-
-	// 编码返回结果：abi.encode(bytes value, uint64 version, bool ok)
+	// 返回可用量（权威缓存值 - 本地冻结量），而非原始权威值
+	value, version, ok := cacheBroadcaster.GetAvailable(contractAddr, shardId, key)
 	return encodeCacheResult(value, version, ok), nil
 }
 
@@ -142,13 +149,21 @@ func (c *joyueCacheListPrecompile) RequiredGas(input []byte) uint64 {
 
 // Run 执行 precompile，返回某个合约的所有缓存键
 func (c *joyueCacheListPrecompile) Run(input []byte) ([]byte, error) {
-	// 输入格式：20 bytes (contractAddr)
-	if len(input) < 20 {
+	// 输入格式：20 bytes (contractAddr) + 4 bytes (shardId)
+	// 或 ABI 编码格式：abi.encode(address,uint32)
+	if len(input) < 24 {
 		return nil, errors.New("JOYUE: invalid input length for cache list")
 	}
 
-	// 解析输入
-	contractAddr := common.BytesToAddress(input[0:20])
+	var contractAddr common.Address
+	var shardId uint32
+	if len(input) >= 64 {
+		contractAddr = common.BytesToAddress(input[12:32])
+		shardId = binary.BigEndian.Uint32(input[60:64])
+	} else {
+		contractAddr = common.BytesToAddress(input[0:20])
+		shardId = binary.BigEndian.Uint32(input[20:24])
+	}
 
 	// 从全局缓存广播器获取所有缓存
 	cacheBroadcaster := joyue.GetGlobalCacheBroadcaster()
@@ -158,7 +173,7 @@ func (c *joyueCacheListPrecompile) Run(input []byte) ([]byte, error) {
 	}
 
 	// 获取该合约的所有缓存条目
-	entries := cacheBroadcaster.GetAllCacheForContract(contractAddr)
+	entries := cacheBroadcaster.GetAllCacheForContract(contractAddr, shardId)
 
 	// 编码返回结果：abi.encode(bytes32[] keys, bytes[] values, uint64[] versions)
 	return encodeCacheListResult(entries), nil
@@ -247,58 +262,96 @@ type joyueCacheWritePrecompile struct{}
 // RequiredGas 返回执行 precompile 所需的 gas
 func (c *joyueCacheWritePrecompile) RequiredGas(evm *EVM, contract *Contract, input []byte) (uint64, error) {
 	// 基础 gas + 输入数据 gas
-	// input = 20 bytes (contractAddr) + 32 bytes (key) + 32 bytes (value) + 32 bytes (version) = 116 bytes
+	// input = 20 bytes (contractAddr) + 4 bytes (shardId) + 32 bytes (key) + 32 bytes (value) + 32 bytes (version) = 120 bytes
 	baseGas := uint64(200) // 写入操作需要更多 gas
 	dataGas := uint64(len(input)+31) / 32 * params.IdentityPerWordGas
 	return baseGas + dataGas, nil
 }
 
-// RunWriteCapable 执行 precompile，更新本地缓存（不广播）
+// RunWriteCapable 执行 precompile，支持两种语义（均为 ABI 编码，共 160 bytes）：
+//
+//  1. Freeze（D_SUB 冻结，由 JoyueLib._applyCacheWrite 在 txId != 0 时调用）：
+//     abi.encode(address contractAddr, uint32 shardId, bytes32 key, bytes32 txId, uint256 amount)
+//     第 4 个参数为 bytes32（txId），第 5 个参数为 uint256（amount）。
+//     返回 abi(bytes32) 其中值为 1 表示成功，0 表示可用量不足。
+//
+//  2. Write（D_ADD/D_SET 快进写缓存，由 JoyueLib._applyCacheWrite 在非 D_SUB 时调用）：
+//     abi.encode(address contractAddr, uint32 shardId, bytes32 key, uint256 value, uint64 version)
+//     第 4 个参数为 uint256（value），第 5 个参数为 uint64（version）。
+//     返回空表示成功。
+//
+// 区分方式：检查第 4 个参数（input[96:128]）的高 16 字节（input[96:112]）：
+//   - 若有非零 → 第 4 参数是 txId（bytes32 keccak256），视为 Freeze 语义。
+//   - 若全零 → 第 4 参数是 value（uint256 小数值左填充），视为 Write 语义。
+//
+// 注：原逻辑检查第 5 参数 input[128:156] 会误判——Freeze 的 amount 较小时高字节全零，
+//
+//	被当作 Write，导致 txId 被当作 value 解析，出现巨大数字。
 func (c *joyueCacheWritePrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
-	// 输入格式：20 bytes (contractAddr) + 32 bytes (key) + 32 bytes (value) + 32 bytes (version)
-	if len(input) < 116 {
-		return nil, errors.New("JOYUE: invalid input length for cache write")
+	if len(input) < 160 {
+		return nil, errors.New("JOYUE: invalid input length for cache write/freeze (need 160 bytes ABI)")
 	}
 
-	// 解析输入
-	contractAddr := common.BytesToAddress(input[0:20])
-	key := common.BytesToHash(input[20:52])
-	value := input[52:84]         // 32 bytes value
-	versionBytes := input[84:116] // 32 bytes version (实际只有最后 8 bytes 有效)
+	contractAddr := common.BytesToAddress(input[12:32])
+	shardId := binary.BigEndian.Uint32(input[60:64])
+	key := common.BytesToHash(input[64:96])
 
-	// 解析 version (uint64, 从最后 8 bytes 读取)
-	version := binary.BigEndian.Uint64(versionBytes[24:32])
-
-	// 从全局缓存广播器更新本地缓存（不广播）
 	cacheBroadcaster := joyue.GetGlobalCacheBroadcaster()
 	if cacheBroadcaster == nil {
-		utils.Logger().Error().
-			Str("contract", contractAddr.Hex()).
-			Str("key", key.Hex()).
-			Uint64("version", version).
-			Msg("[JOYUE] cache broadcaster not initialized in precompile")
 		return nil, errors.New("JOYUE: cache broadcaster not initialized")
 	}
 
-	valueUint := new(big.Int).SetBytes(value)
+	// 区分 Freeze 和 Write：检查第 4 个参数（input[96:128]）的高 16 字节
+	// - Freeze：第 4 参数是 txId（bytes32 keccak256），高字节几乎必然非零
+	// - Write：第 4 参数是 value（uint256），小数值时高字节为零
+	// 注：原逻辑检查 input[128:156]（第 5 参数）会误判：Freeze 的 amount 较小时高字节全零，被当作 Write，
+	//     导致 txId 被当作 value 解析，出现巨大数字（如 18515326...）
+	isFreeze := false
+	for _, b := range input[96:112] {
+		if b != 0 {
+			isFreeze = true
+			break
+		}
+	}
+
+	if isFreeze {
+		// Freeze 语义：abi.encode(address, uint32, bytes32, bytes32 txId, uint256 amount)
+		txId := common.BytesToHash(input[96:128])
+		amount := new(big.Int).SetBytes(input[128:160])
+
+		utils.Logger().Info().
+			Str("contract", contractAddr.Hex()).
+			Uint32("shardId", shardId).
+			Str("key", key.Hex()).
+			Str("txId", txId.Hex()).
+			Str("amount", amount.String()).
+			Msg("[JOYUE] precompile: Freeze request")
+
+		ok := cacheBroadcaster.Freeze(contractAddr, shardId, key, txId, amount)
+
+		// 返回 32 bytes：[31]=0x01 成功，[31]=0x00 失败
+		result := make([]byte, 32)
+		if ok {
+			result[31] = 0x01
+		}
+		return result, nil
+	}
+
+	// Write 语义：abi.encode(address, uint32, bytes32, uint256 value, uint64 version)
+	valueCopy := make([]byte, 32)
+	copy(valueCopy, input[96:128])
+	version := binary.BigEndian.Uint64(input[152:160])
+
+	valueUint := new(big.Int).SetBytes(valueCopy)
 	utils.Logger().Info().
 		Str("contract", contractAddr.Hex()).
+		Uint32("shardId", shardId).
 		Str("key", key.Hex()).
 		Uint64("version", version).
 		Str("value", valueUint.String()).
-		Int("valueLen", len(value)).
-		Msg("[JOYUE] precompile: calling SetCacheLocal")
+		Msg("[JOYUE] precompile: SetCacheLocal (fast-forward write)")
 
-	// 更新本地缓存（不广播，只有主合约的修改才广播）
-	cacheBroadcaster.SetCacheLocal(contractAddr, key, value, version)
-
-	utils.Logger().Info().
-		Str("contract", contractAddr.Hex()).
-		Str("key", key.Hex()).
-		Uint64("version", version).
-		Msg("[JOYUE] precompile: SetCacheLocal completed")
-
-	// 返回空表示成功
+	cacheBroadcaster.SetCacheLocal(contractAddr, shardId, key, valueCopy, version)
 	return nil, nil
 }
 
@@ -394,6 +447,10 @@ func (c *joyueCurrentShardPrecompile) RequiredGas(evm *EVM, contract *Contract, 
 // RunWriteCapable 执行 precompile，返回当前分片 ID
 func (c *joyueCurrentShardPrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
 	shardID := evm.Context.ShardID
+	utils.Logger().Info().
+		Uint32("ShardID", shardID).
+		Str("caller", contract.CallerAddress.Hex()).
+		Msg("[JOYUE] precompile 0x6C getCurrentShardID: evm.Context.ShardID")
 	result := make([]byte, 32)
 	binary.BigEndian.PutUint32(result[28:32], shardID)
 	return result, nil
@@ -494,44 +551,11 @@ func (c *joyueRpcOracleSendTxPrecompile) RunWriteCapable(evm *EVM, contract *Con
 			Msg("[JOYUE] failed to parse callbackAddr from calldata, using caller as default")
 	}
 
-	// 发出 CrossShardRequest 事件
-	// 事件签名：CrossShardRequest(uint256 indexed requestId, uint32 targetShardID, address target, bytes calldata, uint256 value, address callbackAddr, bytes4 callbackSelector)
-	// Topics[0] = keccak256("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)")
-	// Topics[1] = requestId (indexed)
-	// Data = abi.encode(targetShardID, target, calldata, value, callbackAddr, callbackSelector)
-
-	eventSignature := hash.Keccak256Hash([]byte("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)"))
-	requestIdHashForTopic := common.BigToHash(new(big.Int).SetUint64(requestId))
-
-	// 编码事件数据：targetShardID (32 bytes) + target (32 bytes) + calldata (offset + length + data) + value (32 bytes) + callbackAddr (32 bytes) + callbackSelector (32 bytes)
-	// 简化：使用紧凑格式，避免复杂的 ABI 编码
-	// 格式：shardID (4 bytes) + target (20 bytes) + calldataLen (4 bytes) + calldata + value (32 bytes) + callbackAddr (20 bytes) + callbackSelector (4 bytes)
-	eventData := make([]byte, 0, 4+20+4+len(calldata)+32+20+4)
-	eventData = append(eventData, make([]byte, 4)...)
-	binary.BigEndian.PutUint32(eventData[0:4], shardID)
-	eventData = append(eventData, to.Bytes()...)
-	eventData = append(eventData, make([]byte, 4)...)
-	binary.BigEndian.PutUint32(eventData[len(eventData)-4:], uint32(len(calldata)))
-	eventData = append(eventData, calldata...)
-	// value (32 bytes)
-	valueBytes := make([]byte, 32)
-	value.FillBytes(valueBytes)
-	eventData = append(eventData, valueBytes...)
-	// callbackAddr (20 bytes)
-	eventData = append(eventData, callbackAddr.Bytes()...)
-	// callbackSelector (4 bytes)
-	eventData = append(eventData, callbackSelector[:]...)
-
-	// Precompile 地址（0x6D = 109）
-	precompileAddr := common.BytesToAddress([]byte{109})
-
-	// 发出事件
-	evm.StateDB.AddLog(&types.Log{
-		Address:     precompileAddr,
-		Topics:      []common.Hash{eventSignature, requestIdHashForTopic},
-		Data:        eventData,
-		BlockNumber: evm.BlockNumber.Uint64(),
-	})
+	// 复用统一的事件发出逻辑
+	requestIdHashForTopic, err := emitCrossShardRequestEvent(evm, contract, shardID, to, value, calldata, callbackAddr, callbackSelector, requestId)
+	if err != nil {
+		return nil, err
+	}
 
 	utils.Logger().Info().
 		Uint64("requestId", requestId).
@@ -657,4 +681,58 @@ func encodeBatchResult(txHashes []common.Hash, successCount uint32) []byte {
 	result = append(result, successCountBytes...)
 
 	return result
+}
+
+// emitCrossShardRequestEvent 发出 CrossShardRequest 事件的统一函数
+// 事件签名：CrossShardRequest(uint256 indexed requestId, uint32 targetShardID, address target, bytes calldata, uint256 value, address callbackAddr, bytes4 callbackSelector)
+// 返回 requestId 的哈希（用于作为事件 topic），以及可能的错误
+func emitCrossShardRequestEvent(evm *EVM, contract *Contract, targetShardID uint32, targetAddr common.Address, value *big.Int, calldata []byte, callbackAddr common.Address, callbackSelector [4]byte, requestId uint64) (common.Hash, error) {
+	// 事件签名：CrossShardRequest(uint256 indexed requestId, uint32 targetShardID, address target, bytes calldata, uint256 value, address callbackAddr, bytes4 callbackSelector)
+	// Topics[0] = keccak256("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)")
+	// Topics[1] = requestId (indexed)
+	// Data = abi.encode(targetShardID, target, calldata, value, callbackAddr, callbackSelector)
+
+	eventSignature := hash.Keccak256Hash([]byte("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)"))
+	requestIdHashForTopic := common.BigToHash(new(big.Int).SetUint64(requestId))
+
+	// 编码事件数据：targetShardID (32 bytes) + target (32 bytes) + calldata (offset + length + data) + value (32 bytes) + callbackAddr (32 bytes) + callbackSelector (32 bytes)
+	// 简化：使用紧凑格式，避免复杂的 ABI 编码
+	// 格式：shardID (4 bytes) + target (20 bytes) + calldataLen (4 bytes) + calldata + value (32 bytes) + callbackAddr (20 bytes) + callbackSelector (4 bytes)
+	eventData := make([]byte, 0, 4+20+4+len(calldata)+32+20+4)
+	eventData = append(eventData, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(eventData[0:4], targetShardID)
+	eventData = append(eventData, targetAddr.Bytes()...)
+	eventData = append(eventData, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(eventData[len(eventData)-4:], uint32(len(calldata)))
+	eventData = append(eventData, calldata...)
+	// value (32 bytes)
+	valueBytes := make([]byte, 32)
+	value.FillBytes(valueBytes)
+	eventData = append(eventData, valueBytes...)
+	// callbackAddr (20 bytes)
+	eventData = append(eventData, callbackAddr.Bytes()...)
+	// callbackSelector (4 bytes)
+	eventData = append(eventData, callbackSelector[:]...)
+
+	// Precompile 地址（0x6D = 109）
+	precompileAddr := common.BytesToAddress([]byte{109})
+
+	// 发出事件
+	evm.StateDB.AddLog(&types.Log{
+		Address:     precompileAddr,
+		Topics:      []common.Hash{eventSignature, requestIdHashForTopic},
+		Data:        eventData,
+		BlockNumber: evm.BlockNumber.Uint64(),
+	})
+
+	utils.Logger().Info().
+		Uint64("requestId", requestId).
+		Uint32("targetShardID", targetShardID).
+		Str("targetAddr", targetAddr.Hex()).
+		Str("callbackAddr", callbackAddr.Hex()).
+		Str("caller", contract.CallerAddress.Hex()).
+		Msg("[JOYUE] emitted CrossShardRequest event")
+
+	// 返回 requestId 的哈希（32 bytes），合约可以用这个来追踪请求
+	return requestIdHashForTopic, nil
 }

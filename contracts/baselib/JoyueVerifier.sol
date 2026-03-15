@@ -89,11 +89,14 @@ contract JoyueVerifier is JoyueStorage {
         (cur, curVer) = _prefetchRead(g.contractAddr, g.key);
 
         uint256 rhs = abi.decode(g.val, (uint256));
+
+        // todo 这里需要考虑一下是否加入版本一致性校验
         guardOk = _cmp(g.op, cur, rhs);
         if (guardOk) {
             return (true, cur, curVer, false, new JoyueLib.Guard[](0), new JoyueLib.Delta[](0));
         }
 
+        // todo 这里逻辑树可能会有些问题，目前的结构是一组guard对应一组Delta，这里验证一个guard失败就开始调用重试了
         (retryOk, newGuards, newDeltas) = _logicTreeRetry(req, guardIndex, g.key, cur, curVer);
         return (guardOk, cur, curVer, retryOk, newGuards, newDeltas);
     }

@@ -344,6 +344,8 @@ contract JoyueCoordinator is JoyueVerifier {
             deltasOverride
         );
         (Decision memory dec, AttemptResult memory out) = _decide(attemptNo, participants.length, details, done, active, okMatrix);
+
+        // todo 这里需要考虑是否需要在这里实现一次跨分片请求，在第二次确认请求的时候将这些内容附带过去
         _finalizeColumns(batchId, participants, dec);
         emit RoundDone(batchId, attemptNo, dec.commitCount, dec.retryCount + dec.failCount);
         return out;
@@ -399,7 +401,7 @@ contract JoyueCoordinator is JoyueVerifier {
             deltasOverride
         );
 
-        // 这里是模拟发送给其他合约
+        // todo 这里需要调整为真实的合约调用，可以利用shardcall，但是需要适应性改造
         ColumnResult[] memory res = JoyueCoordinator(participant).batchVerifyAndFreeze(batchId, col);
         require(res.length == idxMap.length, "JOYUE: res/idxMap mismatch");
         for (uint256 k = 0; k < res.length; k++) {
@@ -498,17 +500,19 @@ contract JoyueCoordinator is JoyueVerifier {
                     continue;
                 }
 
-                hasFailure = true;
                 if (retryOk) {
                     ctx.useOverride[i] = true;
                     ctx.guardsOverride[i] = newGuards;
                     ctx.deltasOverride[i] = newDeltas;
                     ctx.active[i] = true;
                 } else {
+                    // 标记为真正的失败
+                    hasFailure = true;
                     ctx.terminalFail[i] = true;
                     done[i] = true;
                     ctx.active[i] = false;
                 }
+                // 无论重试是否成功，旧的 Guard 链都不再继续验证了
                 break;
             }
 
@@ -616,6 +620,8 @@ contract JoyueCoordinator is JoyueVerifier {
             if (done[i]) continue;
             if (!retryMask[i]) continue;
 
+
+            // todo 这里的逻辑树重试 已经是最新的资源
             (bool logicTreeOk, JoyueLib.Guard[] memory newG, JoyueLib.Delta[] memory newD) =
                 _logicTreeRetry(details[i].req, 0, bytes32(0), 0, 0);
 
