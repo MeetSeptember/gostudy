@@ -41,6 +41,7 @@ import (
 	"github.com/harmony-one/harmony/core/rawdb"
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
+	internalcommon "github.com/harmony-one/harmony/internal/common"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
 	shardingconfig "github.com/harmony-one/harmony/internal/configs/sharding"
 	"github.com/harmony-one/harmony/internal/utils"
@@ -136,6 +137,15 @@ func NewGenesisSpec(netType nodeconfig.NetworkType, shardID uint32) *Genesis {
 			// PK: 1f84c95ac16e6a50f08d44c7bde7aff8742212fda6e4321fde48bf83bef266dc
 			testAddress := common.HexToAddress("0xA5241513DA9F4463F1d4874b548dFBAC29D91f34")
 			genesisAlloc[testAddress] = GenesisAccount{Balance: contractDeployerFunds}
+
+			// JOYUE Relayer 账号（relayer-shard0 / relayer-shard1）
+			relayerAddresses := []common.Address{
+				internalcommon.MustBech32ToAddress("one1lylsfclkm6q575dyg4ue47vdcyad6q0d4kge45"), // relayer-shard0
+				internalcommon.MustBech32ToAddress("one1jq3ut362u970xzt9yqls7e2tq096wd6wkl4td4"), // relayer-shard1
+			}
+			for _, addr := range relayerAddresses {
+				genesisAlloc[addr] = GenesisAccount{Balance: contractDeployerFunds}
+			}
 		}
 	}
 

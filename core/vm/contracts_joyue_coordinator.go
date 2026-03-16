@@ -44,6 +44,8 @@ const (
 	clearRoundSelector = 0x697cc3a3
 	// processBundleWithOneRetry(...)
 	processBundleWithOneRetrySelector = 0xdae3bdad
+	// processIntentBatch(bytes[]) - keccak256("processIntentBatch(bytes[])")[:4]
+	processIntentBatchSelector = 0x7d5e812e
 	// processIntent(bytes) - selector computed via keccak256 at init
 	// onCrossShardCallback(uint256,bool,bytes)
 	// 函数签名: onCrossShardCallback(uint256,bool,bytes)
@@ -97,18 +99,18 @@ type joyueCoordinatorPrecompile struct{}
 // ============================================================
 // ABI decode helpers (uint256/offset/len)
 // ============================================================
-// ABI 中 uint256/offset/len 都是 32 bytes，大端序，数值右对齐（最后 8 bytes）。
-// 为了本地实验性实现，这里只支持 <= uint64 的值；若高 24 bytes 非 0，则认为溢出。
+// ABI 中 uint256/offset/len 都是 32 bytes，大端序，数值右对齐。
+// 使用 big.Int 读取完整 uint256，若值 <= uint64 则返回；否则报溢出。
+// 兼容不同来源的 ABI 编码（Relayer、go-ethereum abi.Pack、Solidity 等）。
 func readU256AsUint64(data []byte, pos int) (uint64, error) {
 	if pos < 0 || pos+32 > len(data) {
 		return 0, errors.New("JOYUE: readU256 out of range")
 	}
-	for i := 0; i < 24; i++ {
-		if data[pos+i] != 0 {
-			return 0, errors.New("JOYUE: uint256 overflow (> uint64)")
-		}
+	v := new(big.Int).SetBytes(data[pos : pos+32])
+	if !v.IsUint64() {
+		return 0, errors.New("JOYUE: uint256 overflow (> uint64)")
 	}
-	return binary.BigEndian.Uint64(data[pos+24 : pos+32]), nil
+	return v.Uint64(), nil
 }
 
 func readU256AsInt(data []byte, pos int) (int, error) {
@@ -194,6 +196,9 @@ func (c *joyueCoordinatorPrecompile) RequiredGas(evm *EVM, contract *Contract, i
 	case processIntentSelector:
 		// 解析 payload + 执行 2PC 协调，按较高成本估算
 		return baseGas + dataGas + uint64(100000), nil
+	case processIntentBatchSelector:
+		// 批量处理，按多个 intent 估算
+		return baseGas + dataGas + uint64(300000), nil
 	case applyCommitAndRetrySelector:
 		// finalize C1 + unfreeze R + re-freeze R，成本与 batchVerifyAndFreeze 相当
 		return baseGas + dataGas + uint64(20000), nil
@@ -231,6 +236,9 @@ func (c *joyueCoordinatorPrecompile) RunWriteCapable(evm *EVM, contract *Contrac
 	case processIntentSelector:
 		utils.Logger().Info().Msg("[JOYUE Coordinator] routing to handleProcessIntent")
 		return c.handleProcessIntent(evm, contract, coordinatorAddr, paramsInfo)
+	case processIntentBatchSelector:
+		utils.Logger().Info().Msg("[JOYUE Coordinator] routing to handleProcessIntentBatch")
+		return c.handleProcessIntentBatch(evm, contract, coordinatorAddr, paramsInfo)
 	case batchVerifyAndFreezeSelector:
 		utils.Logger().Info().
 			Str("selector", fmt.Sprintf("0x%08x", selector)).
@@ -2820,6 +2828,180 @@ func (c *joyueCoordinatorPrecompile) handleProcessIntent(evm *EVM, contract *Con
 	}
 
 	return c.encodeFinalResults(finals)
+}
+
+// handleProcessIntentBatch 处理 processIntentBatch(bytes[]) 调用
+func (c *joyueCoordinatorPrecompile) handleProcessIntentBatch(evm *EVM, contract *Contract, coordinatorAddr common.Address, params []byte) ([]byte, error) {
+	txHash := evm.StateDB.TxHash()
+	blockNum := evm.BlockNumber.Uint64()
+
+	utils.Logger().Info().
+		Str("txHash", txHash.Hex()).
+		Uint64("block", blockNum).
+		Int("paramsLen", len(params)).
+		Str("caller", contract.CallerAddress.Hex()).
+		Msg("[JOYUE Coordinator] handleProcessIntentBatch: entry")
+
+	// params 为 ABI 编码的 bytes[] 参数：offset(32) + [at offset: length(32) + elem_offsets(N*32)] + [len+data, ...]
+	if len(params) < 64 {
+		utils.Logger().Error().Str("txHash", txHash.Hex()).Int("paramsLen", len(params)).Msg("[JOYUE Coordinator] handleProcessIntentBatch: invalid params length")
+		return nil, errors.New("JOYUE: invalid params length for processIntentBatch")
+	}
+
+	arrayOffset, err := readU256AsInt(params, 0)
+	if err != nil {
+		hexLen := 32
+		if len(params) < hexLen {
+			hexLen = len(params)
+		}
+		utils.Logger().Error().
+			Err(err).
+			Str("txHash", txHash.Hex()).
+			Str("params0_32_hex", fmt.Sprintf("%x", params[:hexLen])).
+			Msg("[JOYUE Coordinator] handleProcessIntentBatch: read array offset failed")
+		return nil, err
+	}
+	if arrayOffset+32 > len(params) {
+		utils.Logger().Error().Str("txHash", txHash.Hex()).Int("arrayOffset", arrayOffset).Int("paramsLen", len(params)).Msg("[JOYUE Coordinator] handleProcessIntentBatch: invalid array offset")
+		return nil, errors.New("JOYUE: invalid array offset for processIntentBatch")
+	}
+	payloadCount, err := readU256AsUint64(params, arrayOffset)
+	if err != nil {
+		utils.Logger().Error().Err(err).Str("txHash", txHash.Hex()).Msg("[JOYUE Coordinator] handleProcessIntentBatch: read payload count failed")
+		return nil, err
+	}
+	if payloadCount == 0 {
+		utils.Logger().Error().Str("txHash", txHash.Hex()).Msg("[JOYUE Coordinator] handleProcessIntentBatch: empty payloads")
+		return nil, errors.New("JOYUE: empty payloads")
+	}
+	if payloadCount > 100 {
+		utils.Logger().Error().Str("txHash", txHash.Hex()).Uint64("payloadCount", payloadCount).Msg("[JOYUE Coordinator] handleProcessIntentBatch: too many payloads")
+		return nil, errors.New("JOYUE: too many payloads")
+	}
+
+	// 解析每个 payload，element offsets 在 arrayOffset+32 处
+	details := make([]IntentDetail, 0, payloadCount)
+	var agentShardId uint32
+	var agentContract common.Address
+	var agentBlockNumber uint64
+
+	elemOffsetsBase := arrayOffset + 32
+	for i := uint64(0); i < payloadCount; i++ {
+		elemOffset, err := readU256AsInt(params, elemOffsetsBase+int(i)*32)
+		if err != nil {
+			utils.Logger().Error().Err(err).Str("txHash", txHash.Hex()).Uint64("payloadIndex", i).Msg("[JOYUE Coordinator] handleProcessIntentBatch: read elem offset failed")
+			return nil, err
+		}
+		if elemOffset+32 > len(params) {
+			utils.Logger().Error().Str("txHash", txHash.Hex()).Uint64("payloadIndex", i).Int("elemOffset", elemOffset).Msg("[JOYUE Coordinator] handleProcessIntentBatch: invalid payload element offset")
+			return nil, errors.New("JOYUE: invalid payload element offset")
+		}
+		payloadLen, err := readU256AsUint64(params, elemOffset)
+		if err != nil {
+			utils.Logger().Error().Err(err).Str("txHash", txHash.Hex()).Uint64("payloadIndex", i).Msg("[JOYUE Coordinator] handleProcessIntentBatch: read payload len failed")
+			return nil, err
+		}
+		if elemOffset+32+int(payloadLen) > len(params) {
+			utils.Logger().Error().Str("txHash", txHash.Hex()).Uint64("payloadIndex", i).Int("elemOffset", elemOffset).Uint64("payloadLen", payloadLen).Int("paramsLen", len(params)).Msg("[JOYUE Coordinator] handleProcessIntentBatch: invalid payload length")
+			return nil, errors.New("JOYUE: invalid payload length")
+		}
+		payload := params[elemOffset+32 : elemOffset+32+int(payloadLen)]
+
+		detail, aShardId, aContract, aBlockNum, _, _, _, _, err := c.decodeIntentPayload(payload)
+		if err != nil {
+			utils.Logger().Error().Err(err).Str("txHash", txHash.Hex()).Uint64("payloadIndex", i).Int("payloadLen", len(payload)).Msg("[JOYUE Coordinator] handleProcessIntentBatch: decode payload failed")
+			return nil, fmt.Errorf("JOYUE: decode payload %d failed: %w", i, err)
+		}
+		details = append(details, detail)
+		if i == 0 {
+			agentShardId = aShardId
+			agentContract = aContract
+			agentBlockNumber = aBlockNum
+		}
+	}
+
+	// 组装 IntentBundle
+	bundleIdInput := make([]byte, 0, 32*len(details)+len(coordinatorAddr.Bytes()))
+	for _, d := range details {
+		bundleIdInput = append(bundleIdInput, d.TxHash.Bytes()...)
+	}
+	bundleIdInput = append(bundleIdInput, coordinatorAddr.Bytes()...)
+
+	bundle := IntentBundle{
+		BundleId:         crypto.Keccak256Hash(bundleIdInput),
+		AgentShardId:     agentShardId,
+		MasterShardId:    evm.Context.ShardID,
+		AgentContract:    agentContract,
+		MasterContract:   coordinatorAddr,
+		Epoch:            0,
+		AgentBlockNumber: agentBlockNumber,
+		TimestampMs:      0,
+		Detail:           details,
+	}
+
+	// 合并所有 detail 的 participants
+	participantSet := make(map[Participant]bool)
+	for _, d := range details {
+		for _, p := range c.extractParticipantsFromDetail(d) {
+			participantSet[p] = true
+		}
+	}
+	participants := make([]Participant, 0, len(participantSet))
+	for p := range participantSet {
+		participants = append(participants, p)
+	}
+
+	utils.Logger().Info().
+		Str("txHash", txHash.Hex()).
+		Str("bundleId", bundle.BundleId.Hex()).
+		Int("detailsCount", len(details)).
+		Int("participantsCount", len(participants)).
+		Uint32("agentShardId", agentShardId).
+		Str("agentContract", agentContract.Hex()).
+		Msg("[JOYUE Coordinator] handleProcessIntentBatch: decoded bundle, starting executeProcessBundleWithOneRetry")
+
+	roundIdBase := evm.BlockNumber.Uint64()
+	finals, err := c.executeProcessBundleWithOneRetry(evm, contract, coordinatorAddr, bundle, roundIdBase, participants)
+	if err != nil {
+		utils.Logger().Error().Err(err).
+			Str("txHash", txHash.Hex()).
+			Str("bundleId", bundle.BundleId.Hex()).
+			Int("detailsCount", len(details)).
+			Msg("[JOYUE Coordinator] handleProcessIntentBatch: executeProcessBundleWithOneRetry failed")
+		return nil, err
+	}
+
+	utils.Logger().Info().
+		Str("txHash", txHash.Hex()).
+		Str("bundleId", bundle.BundleId.Hex()).
+		Int("finalsCount", len(finals)).
+		Msg("[JOYUE Coordinator] handleProcessIntentBatch: success")
+
+	// 返回 FinalResult[][]，外层一个元素（本 bundle 的结果数组）
+	return c.encodeFinalResultsBatch(finals)
+}
+
+// encodeFinalResultsBatch 编码 FinalResult[][] 用于 processIntentBatch 返回值
+func (c *joyueCoordinatorPrecompile) encodeFinalResultsBatch(finals []FinalResult) ([]byte, error) {
+	// 返回 (FinalResult[][])，即 [finals]
+	inner, err := c.encodeFinalResults(finals)
+	if err != nil {
+		return nil, err
+	}
+	// 修正 inner 中的 offset：inner 被放在 96 处，其 array data 在 96+32=128
+	copy(inner[24:32], make([]byte, 8))
+	binary.BigEndian.PutUint64(inner[24:32], 128)
+
+	// 外层：offset(32)=32, length(32)=1, elem0_offset(32)=96
+	result := make([]byte, 0, 96+len(inner))
+	result = append(result, make([]byte, 24)...)
+	binary.BigEndian.PutUint64(result[len(result)-8:], 32) // offset to outer array
+	result = append(result, make([]byte, 24)...)
+	binary.BigEndian.PutUint64(result[len(result)-8:], 1) // outer length = 1
+	result = append(result, make([]byte, 24)...)
+	binary.BigEndian.PutUint64(result[len(result)-8:], 96) // element 0 offset
+	result = append(result, inner...)
+	return result, nil
 }
 
 // decodeIntentBundle 解析 IntentBundle 结构

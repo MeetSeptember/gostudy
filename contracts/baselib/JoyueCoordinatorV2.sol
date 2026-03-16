@@ -58,5 +58,16 @@ contract JoyueCoordinatorV2 is JoyueStorageV2 {
         finals = abi.decode(returnData, (FinalResult[]));
     }
 
+    /**
+     * @dev 批量处理 Intent（Relayer 聚合后调用）
+     * 函数签名：processIntentBatch(bytes[])
+     */
+    function processIntentBatch(bytes[] calldata payloads) external returns (FinalResult[][] memory finals) {
+        (bool success, bytes memory returnData) = PRECOMPILE_ADDRESS.delegatecall(msg.data);
+        require(success, "JOYUE: processIntentBatch delegatecall failed");
+
+        finals = abi.decode(returnData, (FinalResult[][]));
+    }
+
 }
 

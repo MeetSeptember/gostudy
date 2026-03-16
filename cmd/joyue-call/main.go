@@ -62,6 +62,8 @@ func main() {
 		gasLimit   = flag.Uint64("gas", 300000, "gasLimit（send=true 时使用；call 会尝试估算）")
 		gasTipGwei = flag.Int64("gas-tip-gwei", 1, "EIP-1559 priority fee（gwei）")
 
+		repeat = flag.Uint("repeat", 1, "send=true 时重复发送次数（>1 时连续发 N 笔，nonce 递增，便于同区块聚合；不等待 receipt）")
+
 		waitReceipt = flag.Bool("wait", false, "send=true 时等待 receipt 并打印 status/tx/block")
 		timeout     = flag.Duration("timeout", 60*time.Second, "等待 receipt 超时")
 	)
@@ -156,58 +158,76 @@ func main() {
 		log.Fatalf("获取 header 失败: %v", err)
 	}
 
-	var tx *ethtypes.Transaction
-	if head.BaseFee != nil {
-		tipCap, tipErr := client.SuggestGasTipCap(ctx)
-		if tipErr != nil || tipCap == nil {
-			tipCap = new(big.Int).Mul(big.NewInt(*gasTipGwei), big.NewInt(1_000_000_000))
-		}
-		feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tipCap)
-		tx = ethtypes.NewTx(&ethtypes.DynamicFeeTx{
-			ChainID:   chainID,
-			Nonce:     nonce,
-			GasTipCap: tipCap,
-			GasFeeCap: feeCap,
-			Gas:       *gasLimit,
-			To:        &to,
-			Value:     valueWei,
-			Data:      calldata,
-		})
-	} else {
-		gasPrice, err := client.SuggestGasPrice(ctx)
-		if err != nil {
-			log.Fatalf("获取 gasPrice 失败: %v", err)
-		}
-		tx = ethtypes.NewTx(&ethtypes.LegacyTx{
-			Nonce:    nonce,
-			GasPrice: gasPrice,
-			Gas:      *gasLimit,
-			To:       &to,
-			Value:    valueWei,
-			Data:     calldata,
-		})
+	signer := ethtypes.LatestSignerForChainID(chainID)
+	repeatN := uint64(*repeat)
+	if repeatN == 0 {
+		repeatN = 1
 	}
 
-	signer := ethtypes.LatestSignerForChainID(chainID)
-	signedTx, err := ethtypes.SignTx(tx, signer, privKey)
-	if err != nil {
-		log.Fatalf("签名失败: %v", err)
-	}
-	if err := client.SendTransaction(ctx, signedTx); err != nil {
-		log.Fatalf("发送失败: %v", err)
+	// repeat > 1 时不等待 receipt，便于多笔交易进入同一区块
+	doWait := *waitReceipt && repeatN == 1
+
+	var lastSignedTx *ethtypes.Transaction
+	for i := uint64(0); i < repeatN; i++ {
+		curNonce := nonce + i
+		var tx *ethtypes.Transaction
+		if head.BaseFee != nil {
+			tipCap, tipErr := client.SuggestGasTipCap(ctx)
+			if tipErr != nil || tipCap == nil {
+				tipCap = new(big.Int).Mul(big.NewInt(*gasTipGwei), big.NewInt(1_000_000_000))
+			}
+			feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tipCap)
+			tx = ethtypes.NewTx(&ethtypes.DynamicFeeTx{
+				ChainID:   chainID,
+				Nonce:     curNonce,
+				GasTipCap: tipCap,
+				GasFeeCap: feeCap,
+				Gas:       *gasLimit,
+				To:        &to,
+				Value:     valueWei,
+				Data:      calldata,
+			})
+		} else {
+			gasPrice, err := client.SuggestGasPrice(ctx)
+			if err != nil {
+				log.Fatalf("获取 gasPrice 失败: %v", err)
+			}
+			tx = ethtypes.NewTx(&ethtypes.LegacyTx{
+				Nonce:    curNonce,
+				GasPrice: gasPrice,
+				Gas:      *gasLimit,
+				To:       &to,
+				Value:    valueWei,
+				Data:     calldata,
+			})
+		}
+
+		signedTx, err := ethtypes.SignTx(tx, signer, privKey)
+		if err != nil {
+			log.Fatalf("签名失败: %v", err)
+		}
+		if err := client.SendTransaction(ctx, signedTx); err != nil {
+			log.Fatalf("发送失败 [%d/%d] nonce=%d: %v", i+1, repeatN, curNonce, err)
+		}
+		lastSignedTx = signedTx
+		fmt.Printf("tx[%d/%d] nonce=%d hash=%s\n", i+1, repeatN, curNonce, signedTx.Hash().Hex())
 	}
 
 	fmt.Printf("from=%s\n", from.Hex())
 	fmt.Printf("to=%s\n", to.Hex())
-	fmt.Printf("tx=%s\n", signedTx.Hash().Hex())
 	fmt.Printf("calldata=0x%s\n", hex.EncodeToString(calldata))
+	if repeatN == 1 {
+		fmt.Printf("tx=%s\n", lastSignedTx.Hash().Hex())
+	} else {
+		fmt.Printf("sent %d txs (nonce %d..%d)\n", repeatN, nonce, nonce+repeatN-1)
+	}
 
-	if !*waitReceipt {
+	if !doWait {
 		return
 	}
 	ctx2, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
-	receipt, err := waitForReceipt(ctx2, client, signedTx.Hash())
+	receipt, err := waitForReceipt(ctx2, client, lastSignedTx.Hash())
 	if err != nil {
 		log.Fatalf("等待 receipt 失败: %v", err)
 	}
@@ -225,7 +245,7 @@ func main() {
 			defer rpcClient.Close()
 
 			var traceResult interface{}
-			err = rpcClient.CallContext(ctx2, &traceResult, "debug_traceTransaction", signedTx.Hash().Hex(), map[string]interface{}{
+			err = rpcClient.CallContext(ctx2, &traceResult, "debug_traceTransaction", lastSignedTx.Hash().Hex(), map[string]interface{}{
 				"tracer": "callTracer",
 			})
 			if err == nil {
