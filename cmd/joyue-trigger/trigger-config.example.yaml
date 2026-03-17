@@ -1,0 +1,26 @@
+# joyue-trigger 配置示例
+# 用法: joyue-trigger --config trigger-config.example.yaml --private-key <hex>
+
+# 分片配置：shardID -> {rpc, agent}
+shards:
+  "1":
+    rpc: http://127.0.0.1:9502
+    agent: "0x..."  # FruitShopAgentV2 地址（shard1）
+  "2":
+    rpc: http://127.0.0.1:9504
+    agent: "0x..."  # FruitShopAgentV2 地址（shard2）
+
+# 调用的函数签名（与 joyue-call 一致）
+sig: "buyFruit(string,uint256)"
+
+# 参数列表
+args:
+  - apple
+  - "1"
+
+# 每分片发送次数，0=持续模式（Ctrl+C 停止）
+repeat: 5
+
+# 可选
+gas: 300000
+gas_tip_gwei: 1

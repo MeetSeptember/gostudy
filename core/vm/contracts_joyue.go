@@ -470,8 +470,15 @@ func (c *joyueRpcOracleSendTxPrecompile) RequiredGas(evm *EVM, contract *Contrac
 
 // RunWriteCapable 执行 precompile，通过 RPC 发送交易到其他分片
 func (c *joyueRpcOracleSendTxPrecompile) RunWriteCapable(evm *EVM, contract *Contract, input []byte) ([]byte, error) {
+	// 调试：确认 0x6D 是否被调用（排查 buyFruit 无事件问题）
+	utils.Logger().Info().
+		Int("inputLen", len(input)).
+		Str("caller", contract.CallerAddress.Hex()).
+		Msg("[JOYUE] precompile 0x6D RunWriteCapable ENTERED")
+
 	// 输入格式：4 bytes (shardID) + 20 bytes (to) + 32 bytes (value) + 4 bytes (calldataLen) + calldata
 	if len(input) < 60 {
+		utils.Logger().Warn().Int("inputLen", len(input)).Msg("[JOYUE] 0x6D: invalid input length, returning error")
 		return nil, errors.New("JOYUE: invalid input length for RPC send transaction")
 	}
 

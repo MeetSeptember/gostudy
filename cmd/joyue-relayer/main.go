@@ -234,6 +234,7 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	var lastNoBlockLog time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -249,6 +250,12 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 			}
 
 			if currentBlock <= fromBlock {
+				// 每 30 秒输出一次，便于确认 Relayer 仍在运行但链未出块
+				if time.Since(lastNoBlockLog) > 30*time.Second {
+					log.Printf("[DEBUG] No new blocks (fromBlock=%d, latest=%d), waiting...",
+						fromBlock, currentBlock)
+					lastNoBlockLog = time.Now()
+				}
 				continue // 没有新区块
 			}
 
@@ -261,6 +268,10 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 				log.Printf("[ERROR] failed to filter logs: %v", err)
 				continue
 			}
+
+			// 调试：每次轮询新区块时输出（便于排查 Relayer 无输出问题）
+			log.Printf("[DEBUG] Polled blocks %d-%d (fromBlock=%d, latest=%d), got %d logs from precompile 0x6D",
+				fromBlock, currentBlock, fromBlock, currentBlock, len(logs))
 
 			// 按区块分组处理（支持 Master→Agent 隔离与 Agent→Master 聚合）
 			r.processBlockEvents(ctx, logs)
