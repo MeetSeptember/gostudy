@@ -1,0 +1,32 @@
+# 2PC 双分片：Coordinator 分别部署在 shard 0 和 shard 1
+# shard 0 触发 buy fruit，shard 1 触发 buy book，共享 Wallet 可触发锁竞争
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    sig: "buyFruit(string,uint256)"
+#    args: [apple, "1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    coordinator: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # shard 1 的 Coordinator 地址
+#    sig: "buyBook(string,uint256)"
+#    args: [math, "1"]
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+    sig: "buyFruit(string,uint256)"
+    args: [apple, "1"]
+  "1":
+    rpc: http://127.0.0.1:9502
+    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+    sig: "buyFruit(string,uint256)"
+    args: [ apple, "1" ]
+
+
+
+repeat: 3
+gas: 2000000
+gas_tip_gwei: 1

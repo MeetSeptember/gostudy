@@ -395,16 +395,16 @@ func (r *Relayer) parseExecuteAndCallbackCalldata(event *CrossShardRequestEvent)
 	}
 	masterAddr := common.BytesToAddress(cd[144:164])
 	calldataOffset64 := binary.BigEndian.Uint64(cd[220:228])
-	calldataOffset := int(calldataOffset64)
-	if calldataOffset < 0 {
-		return nil, fmt.Errorf("invalid targetCalldata offset: negative")
+	if calldataOffset64 > 0x7fffffffffffffff {
+		return nil, fmt.Errorf("invalid targetCalldata offset: overflow")
 	}
+	calldataOffset := int(calldataOffset64)
 	dataStart := 4 + calldataOffset
-	if dataStart+32 > len(cd) {
+	if dataStart < 0 || dataStart+32 > len(cd) {
 		return nil, fmt.Errorf("invalid targetCalldata offset")
 	}
 	calldataLen64 := binary.BigEndian.Uint64(cd[dataStart+24 : dataStart+32])
-	if calldataLen64 > uint64(len(cd)) || dataStart+32+int(calldataLen64) > len(cd) {
+	if calldataLen64 > uint64(len(cd)) || calldataLen64 > 0x7fffffffffffffff || dataStart+32+int(calldataLen64) > len(cd) {
 		return nil, fmt.Errorf("invalid targetCalldata length")
 	}
 	calldataLen := int(calldataLen64)
@@ -413,12 +413,15 @@ func (r *Relayer) parseExecuteAndCallbackCalldata(event *CrossShardRequestEvent)
 		return nil, fmt.Errorf("targetCalldata too short for processIntent")
 	}
 	payloadOffset64 := binary.BigEndian.Uint64(targetCalldata[28:36])
+	if payloadOffset64 > 0x7fffffffffffffff {
+		return nil, fmt.Errorf("invalid payload offset: overflow")
+	}
 	payloadStart := 4 + int(payloadOffset64)
-	if payloadStart+32 > len(targetCalldata) {
+	if payloadStart < 0 || payloadStart+32 > len(targetCalldata) {
 		return nil, fmt.Errorf("invalid payload offset")
 	}
 	payloadLen64 := binary.BigEndian.Uint64(targetCalldata[payloadStart+24 : payloadStart+32])
-	if payloadLen64 > uint64(len(targetCalldata)) || payloadStart+32+int(payloadLen64) > len(targetCalldata) {
+	if payloadLen64 > uint64(len(targetCalldata)) || payloadLen64 > 0x7fffffffffffffff || payloadStart+32+int(payloadLen64) > len(targetCalldata) {
 		return nil, fmt.Errorf("invalid payload length")
 	}
 	payloadLen := int(payloadLen64)

@@ -36,15 +36,24 @@ import (
 var sigRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)(?:\(([^)]*)\))?$`)
 
 type ShardConfig struct {
-	RPC   string `yaml:"rpc"`
-	Agent string `yaml:"agent"`
+	RPC         string   `yaml:"rpc"`
+	Agent       string   `yaml:"agent"`
+	Coordinator string   `yaml:"coordinator"`
+	Sig         string   `yaml:"sig"`  // 可选：该分片专用调用（覆盖全局）
+	Args        []string `yaml:"args"` // 可选：该分片专用参数
+}
+
+type CallSpec struct {
+	Sig  string   `yaml:"sig"`
+	Args []string `yaml:"args"`
 }
 
 type Config struct {
-	Shards map[string]ShardConfig `yaml:"shards"` // shardID -> {rpc, agent}
-	Sig    string                 `yaml:"sig"`    // 如 "buyFruit(string,uint256)"
-	Args   []string               `yaml:"args"`   // 参数列表
-	Repeat uint                   `yaml:"repeat"` // 每分片发送次数，0=持续
+	Shards map[string]ShardConfig `yaml:"shards"`
+	Sig    string                 `yaml:"sig"`   // 单调用模式
+	Args   []string               `yaml:"args"`  // 单调用模式
+	Calls  []CallSpec             `yaml:"calls"` // 多调用模式（并行发送，用于锁竞争测试）
+	Repeat uint                   `yaml:"repeat"`
 	Gas    uint64                 `yaml:"gas"`
 	GasTip int64                  `yaml:"gas_tip_gwei"`
 }
@@ -74,8 +83,17 @@ func main() {
 	if len(cfg.Shards) == 0 {
 		log.Fatal("配置中 shards 为空")
 	}
-	if cfg.Sig == "" {
-		log.Fatal("配置中 sig 为空")
+	useCalls := len(cfg.Calls) > 0
+	hasGlobalSig := cfg.Sig != ""
+	hasPerShardSig := false
+	for _, sc := range cfg.Shards {
+		if sc.Sig != "" {
+			hasPerShardSig = true
+			break
+		}
+	}
+	if !useCalls && !hasGlobalSig && !hasPerShardSig {
+		log.Fatal("配置中需指定 sig、calls，或各分片的 sig")
 	}
 	if cfg.Repeat == 0 {
 		log.Printf("[INFO] repeat=0，持续模式，按 Ctrl+C 停止")
@@ -90,11 +108,6 @@ func main() {
 	privKey, err := crypto.HexToECDSA(strings.TrimPrefix(*privateKeyHex, "0x"))
 	if err != nil {
 		log.Fatalf("私钥格式错误: %v", err)
-	}
-
-	calldata, err := encodeCalldata(cfg.Sig, cfg.Args)
-	if err != nil {
-		log.Fatalf("编码 calldata 失败: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,17 +125,51 @@ func main() {
 
 	var wg sync.WaitGroup
 	for shardID, sc := range cfg.Shards {
-		if sc.RPC == "" || sc.Agent == "" {
-			log.Printf("[WARN] 跳过分片 %s：rpc 或 agent 为空", shardID)
+		target := sc.Coordinator
+		if target == "" {
+			target = sc.Agent
+		}
+		if sc.RPC == "" || target == "" {
+			log.Printf("[WARN] 跳过分片 %s：rpc 或 agent/coordinator 为空", shardID)
 			continue
 		}
-		agentAddr := common.HexToAddress(sc.Agent)
+		targetAddr := common.HexToAddress(target)
 
-		wg.Add(1)
-		go func(sid string, rpc string, to common.Address) {
-			defer wg.Done()
-			runShard(ctx, sid, rpc, to, privKey, calldata, cfg.Gas, cfg.GasTip, cfg.Repeat)
-		}(shardID, sc.RPC, agentAddr)
+		sig := sc.Sig
+		args := sc.Args
+		if sig == "" {
+			sig = cfg.Sig
+			args = cfg.Args
+		}
+
+		if useCalls && sig == "" {
+			for i, c := range cfg.Calls {
+				calldata, err := encodeCalldata(c.Sig, c.Args)
+				if err != nil {
+					log.Fatalf("calls[%d] 编码失败: %v", i, err)
+				}
+				sigStr := c.Sig
+				wg.Add(1)
+				go func(sid string, rpc string, to common.Address, cd []byte, sig string) {
+					defer wg.Done()
+					log.Printf("[INFO] [shard %s] 启动 call: %s", sid, sig)
+					runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat)
+				}(shardID, sc.RPC, targetAddr, calldata, sigStr)
+			}
+		} else if sig != "" {
+			calldata, err := encodeCalldata(sig, args)
+			if err != nil {
+				log.Fatalf("[shard %s] 编码失败: %v", shardID, err)
+			}
+			wg.Add(1)
+			go func(sid string, rpc string, to common.Address, cd []byte, s string) {
+				defer wg.Done()
+				log.Printf("[INFO] [shard %s] 启动 call: %s", sid, s)
+				runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat)
+			}(shardID, sc.RPC, targetAddr, calldata, sig)
+		} else {
+			log.Printf("[WARN] 跳过分片 %s：无 sig 或 calls", shardID)
+		}
 	}
 
 	wg.Wait()

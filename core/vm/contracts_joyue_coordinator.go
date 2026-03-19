@@ -1,12 +1,14 @@
 package vm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -751,18 +753,30 @@ func (c *joyueCoordinatorPrecompile) setUint(evm *EVM, addr common.Address, key 
 // isFrozen 通过检查 _frozenDeltas 的长度来判断交易是否已冻结
 // ========== Blob 存储模式实现 ==========
 
+// blob 存储域前缀，避免不同用途的 slot 碰撞（如 ParticipantResult 与 FrozenDeltas）
+const (
+	blobDomainFrozenDeltas      = "frozen_deltas"
+	blobDomainParticipantResult = "participant_result"
+	blobDomainIdxMap            = "idx_map"
+)
+
 // getBlobSlot 计算 blob 的起始 slot（使用 hash 分散存储）
-func getBlobSlot(batchId, txHash common.Hash) common.Hash {
-	// 使用 hash 计算起始 slot，确保分布均匀
-	combined := append(batchId.Bytes(), txHash.Bytes()...)
+// domain 用于隔离不同数据类型，防止 slot 碰撞导致 RLP 解码错误
+func getBlobSlotWithDomain(domain string, batchId, key common.Hash) common.Hash {
+	combined := append([]byte(domain), batchId.Bytes()...)
+	combined = append(combined, key.Bytes()...)
 	hashCombined := crypto.Keccak256Hash(combined)
 
-	// 将 hash 转换为 slot 索引（在预留范围内）
 	slotIndex := new(big.Int).SetBytes(hashCombined.Bytes())
 	slotIndex.Mod(slotIndex, big.NewInt(maxBlobSlots))
 	slotIndex.Add(slotIndex, big.NewInt(blobBaseSlot))
 
 	return common.BigToHash(slotIndex)
+}
+
+// getBlobSlot 兼容旧调用（FrozenDeltas 用 batchId+txHash）
+func getBlobSlot(batchId, txHash common.Hash) common.Hash {
+	return getBlobSlotWithDomain(blobDomainFrozenDeltas, batchId, txHash)
 }
 
 // isFrozen 检查是否已冻结（Blob 模式）
@@ -779,6 +793,7 @@ func (c *joyueCoordinatorPrecompile) isFrozen(evm *EVM, addr common.Address, bat
 func (c *joyueCoordinatorPrecompile) setFrozenDeltasBlob(evm *EVM, addr common.Address, batchId, txHash common.Hash, deltas []Delta) error {
 	utils.Logger().Info().
 		Str("addr", addr.Hex()).
+		Uint32("shardID", evm.Context.ShardID).
 		Str("batchId", batchId.Hex()).
 		Str("txHash", txHash.Hex()).
 		Int("deltasCount", len(deltas)).
@@ -851,6 +866,7 @@ func (c *joyueCoordinatorPrecompile) setFrozenDeltasBlob(evm *EVM, addr common.A
 		Str("batchId", batchId.Hex()).
 		Str("txHash", txHash.Hex()).
 		Int("slotCount", slotCount).
+		Uint64("blockNumber", evm.BlockNumber.Uint64()).
 		Msg("[JOYUE Coordinator] setFrozenDeltasBlob: COMPLETED")
 
 	return nil
@@ -1574,6 +1590,9 @@ func (c *joyueCoordinatorPrecompile) executeBatchVerifyAndFreeze(evm *EVM, contr
 	utils.Logger().Info().
 		Str("batchId", batchId.Hex()).
 		Str("coordinatorAddr", coordinatorAddr.Hex()).
+		Uint32("shardID", evm.Context.ShardID).
+		Uint64("blockNumber", evm.BlockNumber.Uint64()).
+		Str("txHash", evm.StateDB.TxHash().Hex()).
 		Int("txsCount", len(txs)).
 		Msg("[JOYUE Coordinator] executeBatchVerifyAndFreeze: START")
 
@@ -2210,11 +2229,18 @@ func (c *joyueCoordinatorPrecompile) executeFinalizeBatch(evm *EVM, coordinatorA
 
 		// 场景 1：如果是 Commit，且本地没有冻结，说明严重异常或该节点未参与，直接跳过
 		if commit && !isFrozen {
+			baseSlot := getBlobSlot(batchId, txHash)
+			firstSlot := evm.StateDB.GetState(coordinatorAddr, baseSlot)
 			utils.Logger().Info().
 				Str("coordinatorAddr", coordinatorAddr.Hex()).
+				Uint32("shardID", evm.Context.ShardID).
+				Uint64("blockNumber", evm.BlockNumber.Uint64()).
+				Str("currentTxHash", evm.StateDB.TxHash().Hex()).
 				Str("batchId", batchId.Hex()).
-				Str("txHash", txHash.Hex()).
-				Msg("[JOYUE Coordinator] executeFinalizeBatch: isFrozen=false, skipping commit (no frozen deltas)")
+				Str("commitTxHash", txHash.Hex()).
+				Str("baseSlot", baseSlot.Hex()).
+				Hex("firstSlot", firstSlot.Bytes()).
+				Msg("[JOYUE Coordinator] executeFinalizeBatch: isFrozen=false - check if batchVerifyAndFreeze ran in EARLIER block before this applyFinalize")
 			continue
 		}
 
@@ -2431,6 +2457,12 @@ func (c *joyueCoordinatorPrecompile) handleApplyCommitAndRetry(evm *EVM, contrac
 	// 3. decode ColumnTxs and re-freeze for batch2
 	if len(columnTxsData) == 0 {
 		// 该参与者在 batch2 没有需要处理的 tx，直接返回空 ColumnResults
+		utils.Logger().Warn().
+			Str("coordinatorAddr", coordinatorAddr.Hex()).
+			Str("batch2", batch2.Hex()).
+			Int("commitCount", len(commitTxHashes)).
+			Int("retryCount", len(retryTxHashes)).
+			Msg("[JOYUE Coordinator] handleApplyCommitAndRetry: empty columnTxsData - this participant has no deltas for retry txs, applyFinalize will skip all (isFrozen=false)")
 		return c.encodeColumnResults([]ColumnResult{})
 	}
 	col, err := c.decodeColumnTxArrayBody(columnTxsData)
@@ -2939,7 +2971,7 @@ func (c *joyueCoordinatorPrecompile) handleProcessIntentBatch(evm *EVM, contract
 		Detail:           details,
 	}
 
-	// 合并所有 detail 的 participants
+	// 合并所有 detail 的 participants（必须排序以保证确定性，避免 map 迭代顺序导致 BAD BLOCK merkle root 不一致）
 	participantSet := make(map[Participant]bool)
 	for _, d := range details {
 		for _, p := range c.extractParticipantsFromDetail(d) {
@@ -2950,6 +2982,12 @@ func (c *joyueCoordinatorPrecompile) handleProcessIntentBatch(evm *EVM, contract
 	for p := range participantSet {
 		participants = append(participants, p)
 	}
+	sort.Slice(participants, func(i, j int) bool {
+		if participants[i].ShardId != participants[j].ShardId {
+			return participants[i].ShardId < participants[j].ShardId
+		}
+		return bytes.Compare(participants[i].Addr.Bytes(), participants[j].Addr.Bytes()) < 0
+	})
 
 	utils.Logger().Info().
 		Str("txHash", txHash.Hex()).
@@ -4351,7 +4389,7 @@ func (c *joyueCoordinatorPrecompile) saveParticipantResult(evm *EVM, coordinator
 	evm.StateDB.SetState(coordinatorAddr, participantSlot, resultHash)
 
 	// 使用 Blob 模式存储完整结果（类似 PendingBatch）
-	blobBaseSlot := getBlobSlot(batchId, participantKey(participant))
+	blobBaseSlot := getBlobSlotWithDomain(blobDomainParticipantResult, batchId, participantKey(participant))
 	lengthBytes := make([]byte, 32)
 	binary.BigEndian.PutUint32(lengthBytes[0:4], uint32(len(encoded)))
 	evm.StateDB.SetState(coordinatorAddr, blobBaseSlot, common.BytesToHash(lengthBytes))
@@ -4383,7 +4421,7 @@ func (c *joyueCoordinatorPrecompile) getParticipantResult(evm *EVM, coordinatorA
 	}
 
 	// 读取 Blob 数据
-	blobBaseSlot := getBlobSlot(batchId, participantKey(participant))
+	blobBaseSlot := getBlobSlotWithDomain(blobDomainParticipantResult, batchId, participantKey(participant))
 	firstSlot := evm.StateDB.GetState(coordinatorAddr, blobBaseSlot)
 	length := binary.BigEndian.Uint32(firstSlot[0:4])
 
@@ -4428,7 +4466,7 @@ func (c *joyueCoordinatorPrecompile) saveParticipantIdxMap(evm *EVM, coordinator
 	if err != nil {
 		return err
 	}
-	baseSlot := getBlobSlot(batchId, participantIdxMapKey(participant))
+	baseSlot := getBlobSlotWithDomain(blobDomainIdxMap, batchId, participantIdxMapKey(participant))
 	lengthBytes := make([]byte, 32)
 	binary.BigEndian.PutUint32(lengthBytes[0:4], uint32(len(encoded)))
 	evm.StateDB.SetState(coordinatorAddr, baseSlot, common.BytesToHash(lengthBytes))
@@ -4462,7 +4500,7 @@ func (c *joyueCoordinatorPrecompile) saveParticipantIdxMap(evm *EVM, coordinator
 
 // getParticipantIdxMap 读取参与者 idxMap
 func (c *joyueCoordinatorPrecompile) getParticipantIdxMap(evm *EVM, coordinatorAddr common.Address, batchId common.Hash, participant Participant) ([]int, error) {
-	baseSlot := getBlobSlot(batchId, participantIdxMapKey(participant))
+	baseSlot := getBlobSlotWithDomain(blobDomainIdxMap, batchId, participantIdxMapKey(participant))
 	firstSlot := evm.StateDB.GetState(coordinatorAddr, baseSlot)
 	length := binary.BigEndian.Uint32(firstSlot[0:4])
 	if length == 0 {
