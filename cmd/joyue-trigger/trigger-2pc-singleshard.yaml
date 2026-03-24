@@ -1,0 +1,24 @@
+# 2PC 单分片配置：Coordinator 只在一个分片，所有请求打同一入口
+# 用于 JOYUE vs 2PC 吞吐量对比实验
+# 用法: joyue-trigger --config trigger-2pc-singleshard.yaml --private-key <hex>
+
+# 2PC 入口永远只有一个分片
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: "0x..."  # TwoPhaseCoordinator 地址（shard 0）
+
+sig: "buyFruit(string,uint256)"
+args:
+  - apple
+  - "1"
+
+# 低负载：interval_ms=1000（约 1 TPS）
+# 高负载：interval_ms=0（全速）
+interval_ms: 0
+
+# 0=持续模式（Ctrl+C 停止），或指定次数
+repeat: 0
+
+gas: 2000000
+gas_tip_gwei: 1

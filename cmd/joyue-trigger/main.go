@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -34,6 +36,15 @@ import (
 )
 
 var sigRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)(?:\(([^)]*)\))?$`)
+
+// IntentSent(bytes32 indexed txId, address indexed user, bytes32 fruitType, uint256 quantity) - Agent 发出，Topics[1]=txId
+var intentSentSig = crypto.Keccak256Hash([]byte("IntentSent(bytes32,address,bytes32,uint256)"))
+
+// IntentRejected(bytes32 indexed txId, uint8 reason) - Agent 发出（验证失败），Topics[1]=txId
+var intentRejectedSig = crypto.Keccak256Hash([]byte("IntentRejected(bytes32,uint8)"))
+
+// TwoPCStarted(bytes32 indexed txId, bytes32 itemType, uint256 quantity, address buyer) - Coordinator 发出，Topics[1]=txId
+var twoPCStartedSig = crypto.Keccak256Hash([]byte("TwoPCStarted(bytes32,bytes32,uint256,address)"))
 
 type ShardConfig struct {
 	RPC         string   `yaml:"rpc"`
@@ -49,18 +60,149 @@ type CallSpec struct {
 }
 
 type Config struct {
-	Shards map[string]ShardConfig `yaml:"shards"`
-	Sig    string                 `yaml:"sig"`   // 单调用模式
-	Args   []string               `yaml:"args"`  // 单调用模式
-	Calls  []CallSpec             `yaml:"calls"` // 多调用模式（并行发送，用于锁竞争测试）
-	Repeat uint                   `yaml:"repeat"`
-	Gas    uint64                 `yaml:"gas"`
-	GasTip int64                  `yaml:"gas_tip_gwei"`
+	Shards     map[string]ShardConfig `yaml:"shards"`
+	Sig        string                 `yaml:"sig"`   // 单调用模式
+	Args       []string               `yaml:"args"`  // 单调用模式
+	Calls      []CallSpec             `yaml:"calls"` // 多调用模式（并行发送，用于锁竞争测试）
+	Repeat     uint                   `yaml:"repeat"`
+	IntervalMs uint                   `yaml:"interval_ms"` // 每笔发送后间隔（ms），0=不限速
+	Gas        uint64                 `yaml:"gas"`
+	GasTip     int64                  `yaml:"gas_tip_gwei"`
+}
+
+// pendingTx 待确认的 tx，供 receiptCollector 异步解析 txId
+type pendingTx struct {
+	TxHash   string
+	ShardID  string
+	SendTime int64
+	RpcURL   string
+	Is2PC    bool // true=Coordinator(2PC), false=Agent(JOYUE)
+}
+
+// metricsWriter 用于向 joyue-metrics 输出 JSONL（tx_hash, tx_id, send_time, shard_id, block_number）
+type metricsWriter struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+// writeSentWithTxId 写入包含 tx_id 的记录，供离线关联 metrics
+func (m *metricsWriter) writeSentWithTxId(txHash, txId, shardID string, sendTime int64, blockNumber uint64, blockTime uint64) {
+	if m == nil || m.file == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := map[string]interface{}{"event": "sent", "tx_hash": txHash, "send_time": sendTime, "shard_id": shardID}
+	if txId != "" {
+		rec["tx_id"] = txId
+	}
+	if blockNumber > 0 {
+		rec["block_number"] = blockNumber
+	}
+	if blockTime > 0 {
+		rec["receipt_block_time"] = blockTime * 1000 // 出块时间 Unix 戳，作为交易的接收/确认时间
+	}
+	enc := json.NewEncoder(m.file)
+	_ = enc.Encode(rec)
+}
+
+// receiptCollector 异步轮询 receipt，解析 IntentSent 获取 txId，写入 JSONL
+func receiptCollector(ctx context.Context, pendingCh <-chan pendingTx, mw *metricsWriter, pollInterval time.Duration) {
+	pending := make([]pendingTx, 0, 256)
+	clients := make(map[string]*ethclient.Client)
+	defer func() {
+		for _, c := range clients {
+			if c != nil {
+				c.Close()
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item, ok := <-pendingCh:
+			if !ok {
+				pendingCh = nil
+			} else {
+				pending = append(pending, item)
+			}
+		case <-ticker.C:
+			if len(pending) == 0 {
+				continue
+			}
+			remaining := pending[:0]
+			for _, p := range pending {
+				client, err := getOrCreateClient(ctx, clients, p.RpcURL)
+				if err != nil {
+					remaining = append(remaining, p)
+					continue
+				}
+				receipt, err := client.TransactionReceipt(ctx, common.HexToHash(p.TxHash))
+				if err != nil || receipt == nil {
+					remaining = append(remaining, p)
+					continue
+				}
+				txId := parseTxIdFromReceipt(receipt, p.Is2PC)
+				blockNum := uint64(0)
+				blockTime := uint64(0)
+				if receipt.BlockNumber != nil {
+					blockNum = receipt.BlockNumber.Uint64()
+				}
+				if block, err := client.BlockByHash(ctx, receipt.BlockHash); err == nil && block != nil {
+					blockTime = block.Time()
+				}
+				if mw != nil {
+					mw.writeSentWithTxId(p.TxHash, txId, p.ShardID, p.SendTime, blockNum, blockTime)
+				}
+			}
+			pending = remaining
+		}
+
+		if pendingCh == nil && len(pending) == 0 {
+			return
+		}
+	}
+}
+
+func getOrCreateClient(ctx context.Context, clients map[string]*ethclient.Client, rpcURL string) (*ethclient.Client, error) {
+	if c, ok := clients[rpcURL]; ok && c != nil {
+		return c, nil
+	}
+	c, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return nil, err
+	}
+	clients[rpcURL] = c
+	return c, nil
+}
+
+// parseTxIdFromReceipt 从 receipt 解析 txId；JOYUE 用 IntentSent/IntentRejected，2PC 用 TwoPCStarted，Topics[1]=txId
+func parseTxIdFromReceipt(receipt *ethtypes.Receipt, is2PC bool) string {
+	if is2PC {
+		for _, l := range receipt.Logs {
+			if len(l.Topics) >= 2 && l.Topics[0] == twoPCStartedSig {
+				return l.Topics[1].Hex()
+			}
+		}
+	} else {
+		for _, l := range receipt.Logs {
+			if len(l.Topics) >= 2 && (l.Topics[0] == intentSentSig || l.Topics[0] == intentRejectedSig) {
+				return l.Topics[1].Hex()
+			}
+		}
+	}
+	return ""
 }
 
 func main() {
 	configPath := flag.String("config", "", "配置文件路径（YAML）")
 	privateKeyHex := flag.String("private-key", "", "私钥 hex（不带 0x）")
+	metricsOutput := flag.String("metrics-output", "", "指标输出文件（JSONL），供 joyue-metrics 读取，空则不输出")
 	flag.Parse()
 
 	if *configPath == "" {
@@ -98,6 +240,9 @@ func main() {
 	if cfg.Repeat == 0 {
 		log.Printf("[INFO] repeat=0，持续模式，按 Ctrl+C 停止")
 	}
+	if cfg.IntervalMs > 0 {
+		log.Printf("[INFO] interval_ms=%d，限速模式（约 %.1f TPS/分片）", cfg.IntervalMs, 1000.0/float64(cfg.IntervalMs))
+	}
 	if cfg.Gas == 0 {
 		cfg.Gas = 300000
 	}
@@ -113,6 +258,29 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var mw *metricsWriter
+	var pendingCh chan pendingTx
+	if *metricsOutput != "" {
+		f, err := os.OpenFile(*metricsOutput, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Fatalf("打开 metrics-output 失败: %v", err)
+		}
+		defer f.Close()
+		mw = &metricsWriter{file: f}
+		pendingCh = make(chan pendingTx, 500)
+		var collectorWg sync.WaitGroup
+		collectorWg.Add(1)
+		go func() {
+			defer collectorWg.Done()
+			receiptCollector(ctx, pendingCh, mw, 1500*time.Millisecond)
+		}()
+		defer func() {
+			close(pendingCh)
+			collectorWg.Wait()
+		}()
+		log.Printf("[INFO] metrics-output=%s，将输出 JSONL 供 joyue-metrics 读取", *metricsOutput)
+	}
+
 	if cfg.Repeat == 0 {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -126,6 +294,7 @@ func main() {
 	var wg sync.WaitGroup
 	for shardID, sc := range cfg.Shards {
 		target := sc.Coordinator
+		is2PC := target != ""
 		if target == "" {
 			target = sc.Agent
 		}
@@ -150,11 +319,11 @@ func main() {
 				}
 				sigStr := c.Sig
 				wg.Add(1)
-				go func(sid string, rpc string, to common.Address, cd []byte, sig string) {
+				go func(sid string, rpc string, to common.Address, cd []byte, sig string, twoPC bool) {
 					defer wg.Done()
-					log.Printf("[INFO] [shard %s] 启动 call: %s", sid, sig)
-					runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat)
-				}(shardID, sc.RPC, targetAddr, calldata, sigStr)
+					log.Printf("[INFO] [shard %s] 启动 call: %s (2PC=%v)", sid, sig, twoPC)
+					runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat, cfg.IntervalMs, pendingCh, twoPC)
+				}(shardID, sc.RPC, targetAddr, calldata, sigStr, is2PC)
 			}
 		} else if sig != "" {
 			calldata, err := encodeCalldata(sig, args)
@@ -162,11 +331,11 @@ func main() {
 				log.Fatalf("[shard %s] 编码失败: %v", shardID, err)
 			}
 			wg.Add(1)
-			go func(sid string, rpc string, to common.Address, cd []byte, s string) {
+			go func(sid string, rpc string, to common.Address, cd []byte, s string, twoPC bool) {
 				defer wg.Done()
-				log.Printf("[INFO] [shard %s] 启动 call: %s", sid, s)
-				runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat)
-			}(shardID, sc.RPC, targetAddr, calldata, sig)
+				log.Printf("[INFO] [shard %s] 启动 call: %s (2PC=%v)", sid, s, twoPC)
+				runShard(ctx, sid, rpc, to, privKey, cd, cfg.Gas, cfg.GasTip, cfg.Repeat, cfg.IntervalMs, pendingCh, twoPC)
+			}(shardID, sc.RPC, targetAddr, calldata, sig, is2PC)
 		} else {
 			log.Printf("[WARN] 跳过分片 %s：无 sig 或 calls", shardID)
 		}
@@ -176,7 +345,7 @@ func main() {
 	log.Printf("[INFO] 全部完成")
 }
 
-func runShard(ctx context.Context, shardID, rpcURL string, to common.Address, privKey *ecdsa.PrivateKey, calldata []byte, gasLimit uint64, gasTipGwei int64, repeat uint) {
+func runShard(ctx context.Context, shardID, rpcURL string, to common.Address, privKey *ecdsa.PrivateKey, calldata []byte, gasLimit uint64, gasTipGwei int64, repeat uint, intervalMs uint, pendingCh chan<- pendingTx, is2PC bool) {
 	client, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
 		log.Printf("[shard %s] 连接 RPC 失败: %v", shardID, err)
@@ -260,6 +429,25 @@ func runShard(ctx context.Context, shardID, rpcURL string, to common.Address, pr
 		}
 
 		log.Printf("[shard %s] tx #%d sent: %s", shardID, i+1, signedTx.Hash().Hex())
+		if pendingCh != nil {
+			pendingCh <- pendingTx{
+				TxHash:   signedTx.Hash().Hex(),
+				ShardID:  shardID,
+				SendTime: time.Now().UnixMilli(),
+				RpcURL:   rpcURL,
+				Is2PC:    is2PC,
+			}
+		}
+
+		// interval_ms > 0 时限速（低负载实验用）
+		if intervalMs > 0 {
+			d := time.Duration(intervalMs) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(d):
+			}
+		}
 	}
 
 	log.Printf("[shard %s] done: %d txs", shardID, repeat)

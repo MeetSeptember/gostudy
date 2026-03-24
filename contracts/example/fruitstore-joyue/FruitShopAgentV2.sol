@@ -47,6 +47,10 @@ contract FruitShopAgentV2 {
 
     event IntentSent(bytes32 indexed txId, address indexed user, bytes32 fruitType, uint256 quantity);
     event IntentResultReceived(bytes32 indexed requestId, bool success);
+    /// 缓存/余额不足等验证失败时发出（用于 joyue-metrics 类型 6 统计）
+    event IntentRejected(bytes32 indexed txId, uint8 reason);
+
+    uint8 public constant REASON_CACHE_INSUFFICIENT = 6;
 
     constructor(
         address fruitShopMasterAddr,
@@ -92,7 +96,8 @@ contract FruitShopAgentV2 {
 
         // 从缓存读取状态并验证
         if (!_loadAndValidateState(ctx, fruitType, quantity)) {
-            return (false, bytes32(0), ctx.guards, ctx.deltas);
+            emit IntentRejected(ctx.txId, REASON_CACHE_INSUFFICIENT);
+            return (false, ctx.txId, ctx.guards, ctx.deltas);
         }
 
         // 通过预编译合约发出跨分片 Intent 请求

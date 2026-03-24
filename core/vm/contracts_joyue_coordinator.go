@@ -295,9 +295,9 @@ const (
 	storageSlotResultMatrix = 4 // mapping(bytes32 => mapping(address => ResultMatrix)) _resultMatrices
 	storageSlotRequestIdMap = 5 // mapping(uint256 => RequestIdInfo) _requestIdMap
 
-	// Blob 存储模式：使用连续的 slot 存储 _frozenDeltas
-	blobBaseSlot = 1000  // 预留的 slot 范围起始位置
-	maxBlobSlots = 10000 // 最大 slot 范围
+	// Blob 存储模式：使用 keccak256(domain|batchId|key) 作为 baseSlot，无 Mod 避免碰撞
+	// 读取时 length 上限，防止 slot 碰撞导致污染 length 引发 OOM 死循环
+	maxBlobSize = 512 * 1024 // 512KB，单 blob 最大合理大小
 
 	// 主合约侧 D_SUB 冻结表（解决并发 commit 时错误广播未确认修改的问题）
 	storageSlotTotalFrozen  = 6 // mapping(bytes32 => uint256) key => 未 commit 的 D_SUB 冻结量之和
@@ -760,18 +760,13 @@ const (
 	blobDomainIdxMap            = "idx_map"
 )
 
-// getBlobSlot 计算 blob 的起始 slot（使用 hash 分散存储）
-// domain 用于隔离不同数据类型，防止 slot 碰撞导致 RLP 解码错误
+// getBlobSlotWithDomain 计算 blob 的起始 slot（使用 keccak256 全量 hash，无 Mod）
+// domain 用于隔离不同数据类型；直接使用 256 位 hash 作为 slot，避免 Mod(10000) 导致碰撞
 func getBlobSlotWithDomain(domain string, batchId, key common.Hash) common.Hash {
 	combined := append([]byte(domain), batchId.Bytes()...)
 	combined = append(combined, key.Bytes()...)
 	hashCombined := crypto.Keccak256Hash(combined)
-
-	slotIndex := new(big.Int).SetBytes(hashCombined.Bytes())
-	slotIndex.Mod(slotIndex, big.NewInt(maxBlobSlots))
-	slotIndex.Add(slotIndex, big.NewInt(blobBaseSlot))
-
-	return common.BigToHash(slotIndex)
+	return hashCombined
 }
 
 // getBlobSlot 兼容旧调用（FrozenDeltas 用 batchId+txHash）
@@ -884,6 +879,9 @@ func (c *joyueCoordinatorPrecompile) getFrozenDeltasBlob(evm *EVM, addr common.A
 	if encodedLength == 0 {
 		return nil, nil // 未设置
 	}
+	if encodedLength > maxBlobSize {
+		return nil, fmt.Errorf("JOYUE: corrupted blob length %d exceeds max %d", encodedLength, maxBlobSize)
+	}
 
 	// 计算需要读取的 slot 数量
 	totalBytes := 4 + int(encodedLength)
@@ -929,6 +927,9 @@ func (c *joyueCoordinatorPrecompile) clearFrozenDeltasBlob(evm *EVM, addr common
 	if encodedLength == 0 {
 		return // 已经清除
 	}
+	if encodedLength > maxBlobSize {
+		return // 异常 length，跳过清除避免死循环
+	}
 
 	// 计算需要清除的 slot 数量
 	totalBytes := 4 + int(encodedLength)
@@ -952,6 +953,18 @@ func (c *joyueCoordinatorPrecompile) emitEvent(evm *EVM, contract *Contract, eve
 		BlockNumber: evm.BlockNumber.Uint64(),
 	})
 }
+
+// completionType 用于 AgentResultEmitted 事件（交易结束类型）
+const (
+	CompletionAttempt1DirectSuccess = 1 // attempt1 直接成功
+	CompletionAttempt1DirectFail    = 2 // attempt1 直接失败
+	CompletionAttempt1RetryFail     = 3 // attempt1 重试，attempt1 中重试失败
+	CompletionAttempt2Success       = 4 // attempt2 成功
+	CompletionAttempt2Fail          = 5 // attempt2 失败
+)
+
+// agentResultEmittedEventSig AgentResultEmitted(bytes32 indexed txHash, bool success, uint8 completionType)
+var agentResultEmittedEventSig = crypto.Keccak256Hash([]byte("AgentResultEmitted(bytes32,bool,uint8)"))
 
 // stateBroadcastEventSig StateBroadcast(address indexed contractAddr, bytes32 indexed key, uint256 value, uint64 version, bytes32 txId)
 var stateBroadcastEventSig = crypto.Keccak256Hash([]byte("StateBroadcast(address,bytes32,uint256,uint64,bytes32)"))
@@ -2852,8 +2865,8 @@ func (c *joyueCoordinatorPrecompile) handleProcessIntent(evm *EVM, contract *Con
 		Int("deltasCount", len(deltas)).
 		Msg("[JOYUE Coordinator] handleProcessIntent: decoded payload")
 
-	// 执行 bundle
-	roundIdBase := evm.BlockNumber.Uint64()
+	// 执行 bundle（roundIdBase 需每个 bundle 唯一，避免同区块内 batchId 冲突）
+	roundIdBase := evm.BlockNumber.Uint64()<<32 | uint64(evm.StateDB.TxIndex())
 	finals, err := c.executeProcessBundleWithOneRetry(evm, contract, coordinatorAddr, bundle, roundIdBase, participants)
 	if err != nil {
 		return nil, err
@@ -2998,7 +3011,9 @@ func (c *joyueCoordinatorPrecompile) handleProcessIntentBatch(evm *EVM, contract
 		Str("agentContract", agentContract.Hex()).
 		Msg("[JOYUE Coordinator] handleProcessIntentBatch: decoded bundle, starting executeProcessBundleWithOneRetry")
 
-	roundIdBase := evm.BlockNumber.Uint64()
+	// roundIdBase 必须每个 bundle 唯一，避免同区块内多个 processIntentBatch 共享 batchId 导致 PendingBatch/ResultMatrix 覆盖
+	// 使用 blockNumber<<32 | txIndex 确保同区块内不同交易得到不同 roundIdBase
+	roundIdBase := evm.BlockNumber.Uint64()<<32 | uint64(evm.StateDB.TxIndex())
 	finals, err := c.executeProcessBundleWithOneRetry(evm, contract, coordinatorAddr, bundle, roundIdBase, participants)
 	if err != nil {
 		utils.Logger().Error().Err(err).
@@ -3597,7 +3612,7 @@ func (c *joyueCoordinatorPrecompile) processSecondAttemptMatrix(evm *EVM, contra
 
 	if len(fastFailTxHashes) > 0 {
 		// 立刻通过事件将短路失败的结果通知上层 Agent
-		c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch1.AgentShardId, pendingBatch1.AgentContract, nil, fastFailTxHashes)
+		c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch1.AgentShardId, pendingBatch1.AgentContract, nil, fastFailTxHashes, CompletionAttempt1DirectFail, CompletionAttempt1RetryFail)
 	}
 
 	if len(phase3UnfreezeTxHashes) > 0 {
@@ -4326,6 +4341,9 @@ func (c *joyueCoordinatorPrecompile) getPendingBatch(evm *EVM, coordinatorAddr c
 	if length == 0 {
 		return nil, errors.New("JOYUE: PendingBatch not found")
 	}
+	if length > maxBlobSize {
+		return nil, fmt.Errorf("JOYUE: corrupted PendingBatch length %d exceeds max %d", length, maxBlobSize)
+	}
 
 	// 读取数据
 	slotsNeeded := (int(length) + 31) / 32
@@ -4424,6 +4442,9 @@ func (c *joyueCoordinatorPrecompile) getParticipantResult(evm *EVM, coordinatorA
 	blobBaseSlot := getBlobSlotWithDomain(blobDomainParticipantResult, batchId, participantKey(participant))
 	firstSlot := evm.StateDB.GetState(coordinatorAddr, blobBaseSlot)
 	length := binary.BigEndian.Uint32(firstSlot[0:4])
+	if length > maxBlobSize {
+		return nil, fmt.Errorf("JOYUE: corrupted ParticipantResult length %d exceeds max %d", length, maxBlobSize)
+	}
 
 	slotsNeeded := (int(length) + 31) / 32
 	encoded := make([]byte, 0, length)
@@ -4505,6 +4526,9 @@ func (c *joyueCoordinatorPrecompile) getParticipantIdxMap(evm *EVM, coordinatorA
 	length := binary.BigEndian.Uint32(firstSlot[0:4])
 	if length == 0 {
 		return nil, errors.New("JOYUE: Participant idxMap not found")
+	}
+	if length > maxBlobSize {
+		return nil, fmt.Errorf("JOYUE: corrupted idxMap length %d exceeds max %d", length, maxBlobSize)
 	}
 
 	slotsNeeded := (int(length) + 31) / 32
@@ -4813,7 +4837,8 @@ func (c *joyueCoordinatorPrecompile) emitBatchVerifyAndFreezeRequest(evm *EVM, c
 
 // emitAgentResultToAgent 向原 Agent 发送 Intent 执行结果（成功或失败）
 // 通过跨分片调用 agent.onIntentResult(bytes32 requestId, bool success, bytes memory data)
-func (c *joyueCoordinatorPrecompile) emitAgentResultToAgent(evm *EVM, contract *Contract, coordinatorAddr common.Address, agentShardId uint32, agentContract common.Address, commitTxHashes []common.Hash, failTxHashes []common.Hash) {
+// commitCompletionType/failCompletionType: 1-5，用于 AgentResultEmitted 事件
+func (c *joyueCoordinatorPrecompile) emitAgentResultToAgent(evm *EVM, contract *Contract, coordinatorAddr common.Address, agentShardId uint32, agentContract common.Address, commitTxHashes []common.Hash, failTxHashes []common.Hash, commitCompletionType, failCompletionType uint8) {
 	if agentContract == (common.Address{}) {
 		return
 	}
@@ -4825,15 +4850,25 @@ func (c *joyueCoordinatorPrecompile) emitAgentResultToAgent(evm *EVM, contract *
 	onIntentResultSelector := crypto.Keccak256([]byte("onIntentResult(bytes32,bool,bytes)"))[:4]
 
 	for _, txHash := range commitTxHashes {
-		c.emitSingleAgentResult(evm, contract, coordinatorAddr, agentShardId, agentContract, executorAddr, masterShardId, callbackSelector, txHash, true, onIntentResultSelector)
+		c.emitSingleAgentResult(evm, contract, coordinatorAddr, agentShardId, agentContract, executorAddr, masterShardId, callbackSelector, txHash, true, commitCompletionType, onIntentResultSelector)
 	}
 	for _, txHash := range failTxHashes {
-		c.emitSingleAgentResult(evm, contract, coordinatorAddr, agentShardId, agentContract, executorAddr, masterShardId, callbackSelector, txHash, false, onIntentResultSelector)
+		c.emitSingleAgentResult(evm, contract, coordinatorAddr, agentShardId, agentContract, executorAddr, masterShardId, callbackSelector, txHash, false, failCompletionType, onIntentResultSelector)
 	}
 }
 
+// packAgentResultEmittedData 标准 ABI 编码 (bool success, uint8 completionType)，共 64 字节
+func packAgentResultEmittedData(success bool, completionType uint8) []byte {
+	data := make([]byte, 64)
+	if success {
+		data[31] = 1
+	}
+	data[63] = completionType
+	return data
+}
+
 // emitSingleAgentResult 发送单条结果到 Agent
-func (c *joyueCoordinatorPrecompile) emitSingleAgentResult(evm *EVM, contract *Contract, coordinatorAddr common.Address, agentShardId uint32, agentContract common.Address, executorAddr common.Address, masterShardId uint32, callbackSelector []byte, txHash common.Hash, success bool, onIntentResultSelector []byte) {
+func (c *joyueCoordinatorPrecompile) emitSingleAgentResult(evm *EVM, contract *Contract, coordinatorAddr common.Address, agentShardId uint32, agentContract common.Address, executorAddr common.Address, masterShardId uint32, callbackSelector []byte, txHash common.Hash, success bool, completionType uint8, onIntentResultSelector []byte) {
 	// 构建 agent.onIntentResult(txHash, success, "") 的 calldata
 	// ABI: bytes4 selector + bytes32 requestId + bool success + bytes data(offset, len, empty)
 	agentCalldata := make([]byte, 0, 4+32+32+32+32)
@@ -4897,11 +4932,19 @@ func (c *joyueCoordinatorPrecompile) emitSingleAgentResult(evm *EVM, contract *C
 			Msg("[JOYUE Coordinator] emitAgentResultToAgent: failed")
 		return
 	}
+	// 发出 AgentResultEmitted 事件（用于 joyue-metrics 指标统计）
+	evm.StateDB.AddLog(&types.Log{
+		Address:     coordinatorAddr,
+		Topics:      []common.Hash{agentResultEmittedEventSig, txHash},
+		Data:        packAgentResultEmittedData(success, completionType),
+		BlockNumber: evm.BlockNumber.Uint64(),
+	})
 	utils.Logger().Info().
 		Str("agentContract", agentContract.Hex()).
 		Uint32("agentShardId", agentShardId).
 		Str("txHash", txHash.Hex()).
 		Bool("success", success).
+		Uint8("completionType", completionType).
 		Msg("[JOYUE Coordinator] emitAgentResultToAgent: sent result to agent")
 }
 
@@ -5389,7 +5432,7 @@ func (c *joyueCoordinatorPrecompile) triggerDecision(evm *EVM, contract *Contrac
 		if len(retryTxHashes) > 0 {
 			// 有 retry 交易：进入第二轮
 			// 先向 Agent 发送 C1/F1 的最终结果（R 的结果在 attempt2 发送）
-			c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes)
+			c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes, CompletionAttempt1DirectSuccess, CompletionAttempt1DirectFail)
 			// processSecondAttemptMatrix 内部会同时负责 finalize C1 + F1 + 重新冻结 R
 			pendingBatch.Phase1FailTxHashes = failTxHashes
 			c.savePendingBatch(evm, coordinatorAddr, batchId, *pendingBatch)
@@ -5400,7 +5443,7 @@ func (c *joyueCoordinatorPrecompile) triggerDecision(evm *EVM, contract *Contrac
 		// 使用 batch1（即当前 batchId）上的冻结状态
 		if len(commitTxHashes) > 0 || len(failTxHashes) > 0 {
 			// 向原 Agent 发送结果通知（成功或失败）
-			c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes)
+			c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes, CompletionAttempt1DirectSuccess, CompletionAttempt1DirectFail)
 			utils.Logger().Info().
 				Str("batchId", batchId.Hex()).
 				Int("commitCount", len(commitTxHashes)).
@@ -5451,7 +5494,7 @@ func (c *joyueCoordinatorPrecompile) triggerDecision(evm *EVM, contract *Contrac
 			Msg("[JOYUE Coordinator] triggerDecision attempt2: phase 2 decision saved, starting finalize phase")
 
 		// 向原 Agent 发送结果通知（成功或失败）
-		c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes)
+		c.emitAgentResultToAgent(evm, contract, coordinatorAddr, pendingBatch.AgentShardId, pendingBatch.AgentContract, commitTxHashes, failTxHashes, CompletionAttempt2Success, CompletionAttempt2Fail)
 
 		// 触发 Phase 3：在所有分片上执行 finalize C2 + rollback F2
 		return c.processThirdAttemptMatrix(evm, contract, coordinatorAddr, pendingBatch.Epoch, pendingBatch.RoundIdBase, participants, batchId, commitTxHashes, failTxHashes)

@@ -77,13 +77,14 @@ func isMasterToAgentCallback(event *CrossShardRequestEvent) bool {
 }
 
 // Relayer 跨分片交易 Relayer 服务（完全独立，不依赖链代码）
+// 支持双队列架构：Queue 1 (logsCh) Poller→Worker，Queue 2 (sendCh) Worker→Sender（仅 concurrent=1）
 type Relayer struct {
 	privateKey    *ecdsa.PrivateKey
 	shardRPCs     map[uint32]string // shardID -> RPC URL
 	rpcClients    map[uint32]*ethclient.Client
 	clientsLock   sync.RWMutex
 	clientTimeout time.Duration
-	sendLock      sync.Mutex // 保护 SendTransaction 的并发访问
+	sendLockMap   sync.Map // targetShardID -> *sync.Mutex，按分片加锁，多 Sender 可并行发往不同分片
 
 	sendNonceCache map[uint32]uint64 // targetShardID -> next nonce
 
@@ -96,10 +97,23 @@ type Relayer struct {
 	stopChan        chan struct{}
 	running         bool
 	runningLock     sync.Mutex
+
+	// 双队列：concurrent=0 仅用 logsCh，concurrent=1 用 logsCh + sendCh
+	concurrent   bool
+	numSenders   int                          // concurrent=1 时 Sender 协程数
+	maxBatchSize int                          // Agent→Master 聚合时每批最多多少个（0=不限制）
+	logsCh       chan []ethtypes.Log          // Queue 1: Poller → Worker
+	sendCh       chan *CrossShardRequestEvent // Queue 2: Worker → Sender（concurrent=1 时）
+	pollerWg     sync.WaitGroup
+	workerWg     sync.WaitGroup
+	senderWg     sync.WaitGroup
 }
 
 // NewRelayer 创建新的 Relayer
-func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32, targetShardRPCs string) (*Relayer, error) {
+// concurrent: 0=顺序模式（2PC 安全），1=并发模式（JOYUE 高吞吐，Poller 不阻塞）
+// numSenders: concurrent=1 时 Sender 协程数，多 Sender 可并行发往不同分片
+// maxBatchSize: Agent→Master 聚合时每批最多多少个，0=不限制
+func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32, targetShardRPCs string, concurrent bool, numSenders int, maxBatchSize int) (*Relayer, error) {
 	// 解析私钥
 	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
@@ -139,10 +153,23 @@ func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32,
 	// 计算事件签名
 	eventSignature := hash.Keccak256Hash([]byte("CrossShardRequest(uint256,uint32,address,bytes,uint256,address,bytes4)"))
 
-	log.Printf("[INFO] Relayer created (address: %s, source shard: %d, target shards: %d)",
+	// Queue 1: 有界缓冲，避免 Poller 积压过多
+	logsCh := make(chan []ethtypes.Log, 50)
+	var sendCh chan *CrossShardRequestEvent
+	if concurrent {
+		sendCh = make(chan *CrossShardRequestEvent, 500) // Queue 2，多 Sender 时需更大缓冲
+	}
+	if numSenders < 1 {
+		numSenders = 1
+	}
+
+	log.Printf("[INFO] Relayer created (address: %s, source shard: %d, target shards: %d, concurrent=%v, numSenders=%d, maxBatchSize=%d)",
 		crypto.PubkeyToAddress(privateKey.PublicKey).Hex(),
 		sourceShardID,
-		len(shardRPCs))
+		len(shardRPCs),
+		concurrent,
+		numSenders,
+		maxBatchSize)
 
 	return &Relayer{
 		privateKey:      privateKey,
@@ -157,6 +184,11 @@ func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32,
 		processedEvents: make(map[common.Hash]bool),
 		stopChan:        make(chan struct{}),
 		running:         false,
+		concurrent:      concurrent,
+		numSenders:      numSenders,
+		maxBatchSize:    maxBatchSize,
+		logsCh:          logsCh,
+		sendCh:          sendCh,
 	}, nil
 }
 
@@ -172,11 +204,33 @@ func (r *Relayer) StartFromBlock(ctx context.Context, fromBlock uint64, pollInte
 	r.running = true
 	r.stopChan = make(chan struct{})
 
-	// 启动事件监听 goroutine
-	go r.eventLoop(ctx, fromBlock, pollInterval)
+	// 启动 Worker：消费 Queue 1
+	r.workerWg.Add(1)
+	go func() {
+		defer r.workerWg.Done()
+		r.workerLoop(ctx)
+	}()
 
-	log.Printf("[INFO] Relayer started (RPC: %s, Shard: %d, FromBlock: %d, PollInterval: %v)",
-		r.rpcURL, r.shardID, fromBlock, pollInterval)
+	// 启动多个 Sender：消费 Queue 2（仅 concurrent=1）
+	if r.concurrent {
+		for i := 0; i < r.numSenders; i++ {
+			r.senderWg.Add(1)
+			go func(id int) {
+				defer r.senderWg.Done()
+				r.senderLoop(ctx)
+			}(i)
+		}
+	}
+
+	// 启动 Poller：生产 Queue 1
+	r.pollerWg.Add(1)
+	go func() {
+		defer r.pollerWg.Done()
+		r.pollerLoop(ctx, fromBlock, pollInterval)
+	}()
+
+	log.Printf("[INFO] Relayer started (RPC: %s, Shard: %d, FromBlock: %d, PollInterval: %v, Concurrent: %v, NumSenders: %d)",
+		r.rpcURL, r.shardID, fromBlock, pollInterval, r.concurrent, r.numSenders)
 
 	return nil
 }
@@ -193,6 +247,19 @@ func (r *Relayer) Stop() {
 	r.running = false
 	close(r.stopChan)
 
+	// 等待 Poller 退出（避免向已关闭的 logsCh 发送）
+	r.pollerWg.Wait()
+
+	// 关闭 Queue 1，让 Worker 从阻塞中退出
+	close(r.logsCh)
+	r.workerWg.Wait()
+
+	// 关闭 Queue 2，让 Sender 退出（仅 concurrent=1）
+	if r.concurrent && r.sendCh != nil {
+		close(r.sendCh)
+		r.senderWg.Wait()
+	}
+
 	if r.ethClient != nil {
 		r.ethClient.Close()
 	}
@@ -200,31 +267,24 @@ func (r *Relayer) Stop() {
 	log.Println("[INFO] Relayer stopped")
 }
 
-// eventLoop 事件监听循环
-func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval time.Duration) {
-	// Precompile 地址（0x6D = 109）
+// pollerLoop Poller：只负责轮询链、拉事件、入队，不阻塞在发送上（方案 C）
+func (r *Relayer) pollerLoop(ctx context.Context, fromBlock uint64, pollInterval time.Duration) {
 	precompileAddr := common.BytesToAddress([]byte{109})
-
-	// 查询过滤器配置
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{precompileAddr},
-		Topics: [][]common.Hash{
-			{r.eventSignature}, // 事件签名
-		},
+		Topics:    [][]common.Hash{{r.eventSignature}},
 	}
 
-	// 获取最新区块号
 	latestBlock, err := r.ethClient.BlockNumber(ctx)
 	if err != nil {
 		log.Printf("[ERROR] failed to get latest block number: %v", err)
 		return
 	}
 
-	// 如果 fromBlock 为 0，从最新区块开始
 	if fromBlock == 0 {
 		fromBlock = latestBlock
 		if fromBlock > 100 {
-			fromBlock -= 100 // 回退 100 个区块，避免遗漏
+			fromBlock -= 100
 		}
 		log.Printf("[INFO] Auto-detected fromBlock: %d (latest: %d)", fromBlock, latestBlock)
 	} else {
@@ -235,6 +295,7 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 	defer ticker.Stop()
 
 	var lastNoBlockLog time.Time
+	var lastFromBlockAhead time.Time // 记录 fromBlock > currentBlock 首次出现时间
 	for {
 		select {
 		case <-ctx.Done():
@@ -242,7 +303,6 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 		case <-r.stopChan:
 			return
 		case <-ticker.C:
-			// 获取最新区块号
 			currentBlock, err := r.ethClient.BlockNumber(ctx)
 			if err != nil {
 				log.Printf("[ERROR] failed to get current block number: %v", err)
@@ -250,16 +310,40 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 			}
 
 			if currentBlock <= fromBlock {
-				// 每 30 秒输出一次，便于确认 Relayer 仍在运行但链未出块
+				if fromBlock > currentBlock {
+					if lastFromBlockAhead.IsZero() {
+						lastFromBlockAhead = time.Now()
+					}
+					// 若 fromBlock 长期领先（如 reorg 或链停滞），2 分钟后回退以恢复轮询
+					if time.Since(lastFromBlockAhead) > 2*time.Minute {
+						log.Printf("[WARN] fromBlock(%d) > latest(%d) 已超过 2 分钟，回退 fromBlock 以恢复",
+							fromBlock, currentBlock)
+						fromBlock = currentBlock + 1
+						lastFromBlockAhead = time.Time{}
+					}
+				} else {
+					lastFromBlockAhead = time.Time{}
+				}
 				if time.Since(lastNoBlockLog) > 30*time.Second {
-					log.Printf("[DEBUG] No new blocks (fromBlock=%d, latest=%d), waiting...",
-						fromBlock, currentBlock)
+					if fromBlock > currentBlock {
+						// 超前 1 块多为正常（刚处理完 last block，等待下一块），>1 才可能是停滞/reorg
+						if fromBlock-currentBlock > 1 {
+							log.Printf("[WARN] fromBlock(%d) > latest(%d): 链可能已停滞或发生 reorg",
+								fromBlock, currentBlock)
+						} else {
+							log.Printf("[DEBUG] fromBlock(%d) > latest(%d)，等待链产出新区块",
+								fromBlock, currentBlock)
+						}
+					} else {
+						log.Printf("[DEBUG] No new blocks (fromBlock=%d, latest=%d), waiting...",
+							fromBlock, currentBlock)
+					}
 					lastNoBlockLog = time.Now()
 				}
-				continue // 没有新区块
+				continue
 			}
+			lastFromBlockAhead = time.Time{}
 
-			// 查询事件
 			query.FromBlock = big.NewInt(int64(fromBlock))
 			query.ToBlock = big.NewInt(int64(currentBlock))
 
@@ -269,16 +353,69 @@ func (r *Relayer) eventLoop(ctx context.Context, fromBlock uint64, pollInterval 
 				continue
 			}
 
-			// 调试：每次轮询新区块时输出（便于排查 Relayer 无输出问题）
 			log.Printf("[DEBUG] Polled blocks %d-%d (fromBlock=%d, latest=%d), got %d logs from precompile 0x6D",
 				fromBlock, currentBlock, fromBlock, currentBlock, len(logs))
 
-			// 按区块分组处理（支持 Master→Agent 隔离与 Agent→Master 聚合）
-			r.processBlockEvents(ctx, logs)
-
-			// 更新 fromBlock
-			fromBlock = currentBlock + 1
+			// 入队 Queue 1（阻塞时表示 Worker 处理慢，自然背压）
+			select {
+			case r.logsCh <- logs:
+				fromBlock = currentBlock + 1
+			case <-ctx.Done():
+				return
+			case <-r.stopChan:
+				return
+			}
 		}
+	}
+}
+
+// workerLoop Worker：消费 Queue 1，解析、聚合、发送（方案 C 的消费端）
+func (r *Relayer) workerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.stopChan:
+			return
+		case logs, ok := <-r.logsCh:
+			if !ok {
+				return // channel 已关闭，退出
+			}
+			if len(logs) == 0 {
+				continue
+			}
+			r.processBlockEvents(ctx, logs)
+		}
+	}
+}
+
+// senderLoop Sender：消费 Queue 2，执行实际发送（方案 A，仅 concurrent=1）
+func (r *Relayer) senderLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.stopChan:
+			return
+		case event, ok := <-r.sendCh:
+			if !ok {
+				return // channel 已关闭，退出
+			}
+			r.sendTransaction(ctx, event)
+		}
+	}
+}
+
+// doSend 根据 concurrent 模式选择同步发送或入队 Queue 2
+func (r *Relayer) doSend(ctx context.Context, event *CrossShardRequestEvent) {
+	if r.concurrent {
+		select {
+		case r.sendCh <- event:
+		case <-ctx.Done():
+		case <-r.stopChan:
+		}
+	} else {
+		r.sendTransaction(ctx, event)
 	}
 }
 
@@ -352,7 +489,7 @@ func (r *Relayer) processBlockLogs(ctx context.Context, blockNum uint64, logs []
 		// 隔离：Master→Agent 回调直接单跳转发，不解析（避免 calldata 格式不符时报错）
 		if isMasterToAgentCallback(event) {
 			log.Printf("[INFO] Master→Agent callback (requestId=%d), single-hop forward", event.RequestID)
-			r.sendTransaction(ctx, event)
+			r.doSend(ctx, event)
 			r.processedLock.Lock()
 			r.processedEvents[eventKey] = true
 			r.processedLock.Unlock()
@@ -363,7 +500,7 @@ func (r *Relayer) processBlockLogs(ctx context.Context, blockNum uint64, logs []
 		parsed, err := r.parseExecuteAndCallbackCalldata(event)
 		if err != nil {
 			log.Printf("[WARN] parseExecuteAndCallbackCalldata failed (txHash=%s), fallback to single send: %v", evtLog.TxHash.Hex(), err)
-			r.sendTransaction(ctx, event)
+			r.doSend(ctx, event)
 			r.processedLock.Lock()
 			r.processedEvents[eventKey] = true
 			r.processedLock.Unlock()
@@ -377,12 +514,28 @@ func (r *Relayer) processBlockLogs(ctx context.Context, blockNum uint64, logs []
 		r.processedLock.Unlock()
 	}
 
-	// 对 Agent→Master 聚合组发送
+	// 对 Agent→Master 聚合组发送（按 maxBatchSize 分批）
 	for key, calls := range groups {
 		if len(calls) == 1 {
-			r.sendTransaction(ctx, calls[0].Event)
+			r.doSend(ctx, calls[0].Event)
 		} else {
-			r.sendBatchTransaction(ctx, key.shardID, key.master, calls)
+			batchSize := r.maxBatchSize
+			if batchSize <= 0 {
+				r.sendBatchTransaction(ctx, key.shardID, key.master, calls)
+			} else {
+				for i := 0; i < len(calls); i += batchSize {
+					end := i + batchSize
+					if end > len(calls) {
+						end = len(calls)
+					}
+					batch := calls[i:end]
+					if len(batch) == 1 {
+						r.doSend(ctx, batch[0].Event)
+					} else {
+						r.sendBatchTransaction(ctx, key.shardID, key.master, batch)
+					}
+				}
+			}
 		}
 	}
 }
@@ -530,7 +683,7 @@ func (r *Relayer) sendBatchTransaction(ctx context.Context, targetShardID uint32
 		Calldata:      executorCalldata,
 		Value:         big.NewInt(0),
 	}
-	r.sendTransaction(ctx, event)
+	r.doSend(ctx, event)
 }
 
 // parseEvent 解析 CrossShardRequest 事件
@@ -627,11 +780,18 @@ func (r *Relayer) getClient(shardID uint32) (*ethclient.Client, error) {
 	return client, nil
 }
 
+// getSendLock 按分片获取锁，多 Sender 可并行发往不同分片
+func (r *Relayer) getSendLock(shardID uint32) *sync.Mutex {
+	v, _ := r.sendLockMap.LoadOrStore(shardID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // sendTransaction 发送交易到目标分片
 func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestEvent) {
-	// 使用互斥锁保护整个发送过程
-	r.sendLock.Lock()
-	defer r.sendLock.Unlock()
+	// 按目标分片加锁，不同分片可并行发送
+	lock := r.getSendLock(event.TargetShardID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	// 创建超时上下文
 	ctx, cancel := context.WithTimeout(ctx, r.clientTimeout)
@@ -719,6 +879,9 @@ func main() {
 		targetShardRPCs = flag.String("target-shard-rpcs", "", "目标分片 RPC 地址（格式：shardID=rpcURL,shardID=rpcURL）")
 		fromBlock       = flag.Uint64("from-block", 0, "开始监听的区块号（0 表示从最新区块开始）")
 		pollInterval    = flag.Duration("poll-interval", 2*time.Second, "轮询间隔")
+		concurrent      = flag.Int("concurrent", 0, "0=顺序模式（2PC 安全），1=并发模式（JOYUE 高吞吐）")
+		numSenders      = flag.Int("num-senders", 3, "concurrent=1 时 Sender 协程数，多 Sender 可并行发往不同分片")
+		maxBatchSize    = flag.Int("max-batch-size", 5, "Agent→Master 聚合时每批最多多少个（0=不限制）")
 	)
 
 	flag.Parse()
@@ -727,8 +890,10 @@ func main() {
 		log.Fatal("缺少参数：--private-key")
 	}
 
+	concurrentMode := *concurrent == 1
+
 	// 创建 Relayer
-	relayer, err := NewRelayer(*privateKey, *rpcURL, uint32(*shardID), *targetShardRPCs)
+	relayer, err := NewRelayer(*privateKey, *rpcURL, uint32(*shardID), *targetShardRPCs, concurrentMode, *numSenders, *maxBatchSize)
 	if err != nil {
 		log.Fatalf("创建 Relayer 失败: %v", err)
 	}
@@ -759,6 +924,9 @@ func main() {
 	log.Printf("  分片 ID: %d", *shardID)
 	log.Printf("  开始区块: %d", *fromBlock)
 	log.Printf("  轮询间隔: %v", *pollInterval)
+	log.Printf("  并发模式: %v (0=顺序/2PC, 1=并发/JOYUE)", *concurrent)
+	log.Printf("  Sender 数: %d (concurrent=1 时生效)", *numSenders)
+	log.Printf("  最大批大小: %d (0=不限制)", *maxBatchSize)
 
 	// 等待中断信号
 	sigChan := make(chan os.Signal, 1)

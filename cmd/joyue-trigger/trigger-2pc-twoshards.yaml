@@ -1,5 +1,6 @@
-# 2PC 双分片：Coordinator 分别部署在 shard 0 和 shard 1
-# shard 0 触发 buy fruit，shard 1 触发 buy book，共享 Wallet 可触发锁竞争
+# 2PC 双分片：两个分片同时触发 buyFruit，Coordinator 在 shard 0
+# 需要两个 Relayer：shard0 监听并转发 batchVerifyAndFreeze，shard1 监听并转发 callbacks
+# 若出现 "fromBlock > latest" 或只有第一组完成：检查链是否出块、Relayer 是否都启动
 
 #shards:
 #  "0":
@@ -27,6 +28,7 @@ shards:
 
 
 
-repeat: 3
-gas: 2000000
+repeat: 200
+interval_ms: 0  # 0=不限速
+gas: 800000
 gas_tip_gwei: 1

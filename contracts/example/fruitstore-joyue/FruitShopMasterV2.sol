@@ -19,7 +19,7 @@ contract FruitShopMasterV2 is JoyueCoordinatorV2 {
         bytes32 appleStockKey = JoyueLib.keyOf2("fruit.stock:", APPLE);
         bytes32 bananaStockKey = JoyueLib.keyOf2("fruit.stock:", BANANA);
         
-        _setUint(appleStockKey, 10);
+        _setUint(appleStockKey, 20);
         _setUint(bananaStockKey, 8);
         
         // 发出 StateBroadcast 事件，让 Agent 可以读取缓存
