@@ -1,0 +1,26 @@
+# Sparrow 多分片意图流：与 JOYUE 类似，一个 trigger 并行向 shard0 / shard1 的 IntentShop 发交易。
+# 需在各分片部署 IntentShop；并运行 sparrow-batcher（--rpcs + --intent-shops + --coordinators）。
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-intent-multishard.yaml \
+#   --private-key "..." --metrics-output ./sparrow-sent.jsonl
+#
+# 将下方地址替换为实际部署的 SparrowIntentShop（各分片 RPC 与示例端口按本地节点修改）。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # Shard0 SparrowIntentShop
+    sig: "buyFruitIntentByName(string,uint256)()"
+    args: ["apple", "1"]
+  "1":
+    rpc: http://127.0.0.1:9502
+    coordinator: ""
+    agent: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # Shard1 SparrowIntentShop
+    sig: "buyFruitIntentByName(string,uint256)()"
+    args: ["apple", "1"]
+
+repeat: 100
+interval_ms: 0
+gas: 400000
+gas_tip_gwei: 1

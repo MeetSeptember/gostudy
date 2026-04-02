@@ -46,6 +46,9 @@ var intentRejectedSig = crypto.Keccak256Hash([]byte("IntentRejected(bytes32,uint
 // TwoPCStarted(bytes32 indexed txId, bytes32 itemType, uint256 quantity, address buyer) - Coordinator 发出，Topics[1]=txId
 var twoPCStartedSig = crypto.Keccak256Hash([]byte("TwoPCStarted(bytes32,bytes32,uint256,address)"))
 
+// SparrowBuyIntent（非 2PC）：data 中 intentId 即 metrics 用 tx_id（与 Coordinator BuyItem.txId 一致）
+var sparrowBuyIntentSig = crypto.Keccak256Hash([]byte("SparrowBuyIntent(address,bytes32,uint256,bytes32)"))
+
 type ShardConfig struct {
 	RPC         string   `yaml:"rpc"`
 	Agent       string   `yaml:"agent"`
@@ -76,7 +79,7 @@ type pendingTx struct {
 	ShardID  string
 	SendTime int64
 	RpcURL   string
-	Is2PC    bool // true=Coordinator(2PC), false=Agent(JOYUE)
+	Is2PC    bool // true=协调者合约(2PC 或 Sparrow)，false=Agent(JOYUE)
 }
 
 // metricsWriter 用于向 joyue-metrics 输出 JSONL（tx_hash, tx_id, send_time, shard_id, block_number）
@@ -147,7 +150,6 @@ func receiptCollector(ctx context.Context, pendingCh <-chan pendingTx, mw *metri
 					remaining = append(remaining, p)
 					continue
 				}
-				txId := parseTxIdFromReceipt(receipt, p.Is2PC)
 				blockNum := uint64(0)
 				blockTime := uint64(0)
 				if receipt.BlockNumber != nil {
@@ -157,7 +159,9 @@ func receiptCollector(ctx context.Context, pendingCh <-chan pendingTx, mw *metri
 					blockTime = block.Time()
 				}
 				if mw != nil {
-					mw.writeSentWithTxId(p.TxHash, txId, p.ShardID, p.SendTime, blockNum, blockTime)
+					if txId := parseTxIdFromReceipt(receipt, p.Is2PC); txId != "" {
+						mw.writeSentWithTxId(p.TxHash, txId, p.ShardID, p.SendTime, blockNum, blockTime)
+					}
 				}
 			}
 			pending = remaining
@@ -181,7 +185,7 @@ func getOrCreateClient(ctx context.Context, clients map[string]*ethclient.Client
 	return c, nil
 }
 
-// parseTxIdFromReceipt 从 receipt 解析 txId；JOYUE 用 IntentSent/IntentRejected，2PC 用 TwoPCStarted，Topics[1]=txId
+// parseTxIdFromReceipt 从 receipt 解析 txId：2PC 用 TwoPCStarted；Sparrow Intent 用 SparrowBuyIntent；JOYUE 用 IntentSent/Rejected。Sparrow 调 Coordinator 的发送侧不写 metrics（由 Intent 已写 tx_id）。
 func parseTxIdFromReceipt(receipt *ethtypes.Receipt, is2PC bool) string {
 	if is2PC {
 		for _, l := range receipt.Logs {
@@ -191,6 +195,9 @@ func parseTxIdFromReceipt(receipt *ethtypes.Receipt, is2PC bool) string {
 		}
 	} else {
 		for _, l := range receipt.Logs {
+			if len(l.Topics) == 3 && l.Topics[0] == sparrowBuyIntentSig && len(l.Data) >= 64 {
+				return common.BytesToHash(l.Data[32:64]).Hex()
+			}
 			if len(l.Topics) >= 2 && (l.Topics[0] == intentSentSig || l.Topics[0] == intentRejectedSig) {
 				return l.Topics[1].Hex()
 			}

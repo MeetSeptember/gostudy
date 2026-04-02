@@ -1,0 +1,17 @@
+# Sparrow：直连 Coordinator 测试（buyFruitWave1/2，BuyItem.txId=0，不进 sparrow-metrics 完成侧）
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-coordinator.yaml --private-key "..."
+#
+# 若要走「Intent → batcher → Coordinator」并写 sent JSONL，请用 trigger-sparrow-intent.yaml（agent=IntentShop，coordinator 留空）。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"
+    sig: "buyFruitWave1(address,string,uint256)()"
+    args: ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", apple, "1"]
+
+repeat: 10
+interval_ms: 500
+gas: 1200000
+gas_tip_gwei: 1

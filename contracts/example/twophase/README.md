@@ -33,3 +33,4 @@ go run cmd/joyue-trigger/main.go --config cmd/joyue-trigger/trigger-2pc-lock.yam
 
 - JOYUE：Agent 乐观执行 + Coordinator 聚合
 - 2PC：Coordinator 先 Prepare 再 Commit/Abort，显式锁
+- Sparrow（`../sparrow/`）：同业务下按读写集合并子交易 + 分阶段 2PC，见该目录 README
