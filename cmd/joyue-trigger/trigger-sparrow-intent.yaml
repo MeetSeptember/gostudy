@@ -13,7 +13,7 @@ shards:
     sig: "buyFruitIntentByName(string,uint256)()"
     args: ["apple", "1"]
 
-repeat: 10
+repeat: 400
 interval_ms: 0
 gas: 400000
 gas_tip_gwei: 1

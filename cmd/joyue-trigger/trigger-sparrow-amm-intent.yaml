@@ -1,0 +1,18 @@
+# Sparrow AMM：仅发 SparrowAmmIntentShop.swapIntentExplicit（coordinator 留空；metrics 解析 intentId）
+# clientVersion：0 = batcher 组 swapWave 时由协调者以池权威版本代填；非 0 须与 SparrowAmmPool.ammVersion() 一致
+# 压测推荐：bootstrap -kind amm-sparrow-wallet-a + csv-trigger -scenario wallet-amm-sparrow + sparrow-amm-batcher
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-amm-intent.yaml --private-key "..." --metrics-output ./sparrow-amm-intent-sent.jsonl
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x0000000000000000000000000000000000000000"
+    sig: "swapIntentExplicit(address,uint256,uint256,uint256)()"
+    args: ["0x0000000000000000000000000000000000000001", "1000", "1", "0"]
+
+repeat: 1
+interval_ms: 0
+gas: 200000
+gas_tip_gwei: 1

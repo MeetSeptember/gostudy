@@ -223,8 +223,10 @@ func (c *joyueExecutorPrecompile) executeTarget(evm *EVM, contract *Contract, ta
 			Err(err).
 			Str("target", target.Hex()).
 			Int("calldataLen", len(calldata)).
+			Int("returnDataLen", len(ret)).
 			Msg("[JOYUE Executor] executeTarget: target call failed")
-		return false, nil
+		// 将 revert / require 的 returnData 透传给源分片回调（如 ChainspaceWalletSimulator 的自定义 error），便于解码 finalReason
+		return false, ret
 	}
 
 	utils.Logger().Info().

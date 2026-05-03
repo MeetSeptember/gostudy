@@ -1,0 +1,37 @@
+# joyue-trigger-v2 示例：同一分片并行触发多个 Agent（各 target 独立 to + sig）
+#
+# 用法:
+#   go run ./cmd/joyue-trigger-v2 -- -config cmd/joyue-trigger/trigger-v2-multi-agent.example.yaml -private-key <hex> -metrics-output ./v2-sent.jsonl
+#
+# 说明:
+# - coordinator 留空时为 Intent 路径；is2PC 按「to 是否等于本 shard 的 coordinator」判定。
+# - 下列地址请替换为实际部署值。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    agent: "0x0000000000000000000000000000000000000001"
+    coordinator: ""
+    targets:
+      - to: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"
+        sig: "transfer(uint256)"
+        args: [ "1" ]
+      - to: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"
+        sig: "transfer(uint256)"
+        args: [ "1" ]
+  "1":
+    rpc: http://127.0.0.1:9502
+    agent: "0x0000000000000000000000000000000000000002"
+    coordinator: ""
+    targets:
+      - to: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"
+        sig: "transfer(uint256)"
+        args: [ "1" ]
+      - to: "0x81ac14c04310feDFeC065997f07E83d934659ae7"
+        sig: "transfer(uint256)"
+        args: [ "1" ]
+
+repeat: 1
+interval_ms: 0
+gas: 300000
+gas_tip_gwei: 1

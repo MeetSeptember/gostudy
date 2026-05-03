@@ -4,6 +4,8 @@ Sparrow Batcher — 模拟 Relayer 批处理
 监听 SparrowIntentShop 的 SparrowBuyIntent，在内存中累积意图；
 按定时或达到 max-batch 触发，将本批所有意图编码为 SparrowCoordinator.buyFruitWave（含 BuyItem.txId = intentId）。
 
+NFT Sparrow 请使用独立命令：./cmd/sparrow-nft-batcher
+
 单分片：
 
 	go run ./cmd/sparrow-batcher --rpc http://127.0.0.1:9500 \

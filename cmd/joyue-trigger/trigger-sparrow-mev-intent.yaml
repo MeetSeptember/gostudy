@@ -1,0 +1,21 @@
+# Sparrow MEV：仅发 SparrowMevArbIntent（SparrowMevArbIntentShop）；coordinator 留空，由 sparrow-mev-batcher 聚批调 arbWave。
+# metrics 从 receipt 解析 intentId 作为 tx_id；完成侧用 sparrow-metrics 订阅 SparrowWaveFinished。
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-mev-intent.yaml --private-key "..." --metrics-output ./sparrow-mev-intent-sent.jsonl
+#
+# 勿把 Coordinator 填在 coordinator 字段（否则会 is2PC，无法解析 Intent 的 intentId）。
+# mevIntentExplicit：第一个参数须为已部署环境中使用的套利 user 地址（请替换占位符）。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9502
+    coordinator: ""
+    # 填写已部署的 SparrowMevArbIntentShop 地址（勿填 Coordinator，否则 is2PC 无法解析 intentId）
+    agent: "0x12a4113F44E5689C93df233008FD805BDc882ABb"
+    sig: "mevIntentExplicit(address,uint256,uint256)()"
+    args: ["0x0000000000000000000000000000000000000001", "1000000000000", "1"]
+
+repeat: 96
+interval_ms: 0
+gas: 200000
+gas_tip_gwei: 1

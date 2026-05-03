@@ -1,5 +1,6 @@
 # joyue-trigger 配置示例
 # 用法: joyue-trigger --config trigger-config.example.yaml --private-key <hex>
+# 同一分片多合约：使用 joyue-trigger-v2，并在分片下配置 targets（见 trigger-v2-multi-agent.example.yaml）
 
 # 分片配置：shardID -> {rpc, agent}
 shards:

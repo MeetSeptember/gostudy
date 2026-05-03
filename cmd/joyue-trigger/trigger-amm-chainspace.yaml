@@ -1,0 +1,25 @@
+# AMM Chainspace：链下推荐用 csv-trigger -scenario wallet-amm-chainspace（CSV 单列 user，-amount=amountIn，-min-amount-out）。
+# joyue-trigger 仍可用显式 startSwap(address,uint256,uint256)（objectIds 由 UserClient 内贪心选取）。
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-amm-chainspace.yaml --private-key "<hex>" --metrics-output ./amm-chainspace-trigger-sent.jsonl
+#
+# 部署替换：
+#   - shards."0".agent → AmmChainspaceUserClient 地址（与 RPC 分片一致）。
+#   - 三 Simulator（WalletA MY_INDEX=0、WalletB MY_INDEX=1、Pool MY_INDEX=2）已 setUserClient；peer 拓扑与构造参数见合约注释。
+#   - 须先 bootstrap：go run ./cmd/bootstrap-wallet-balances-from-csv -kind amm-chainspace-wallet-a -wallet <WalletA> ...
+#
+# args[0]：user；args[1]：amountIn；args[2]：minOut。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"
+    sig: "startSwap(address,uint256,uint256)"
+    # Replace args[0] with an address that has been bootstrapped on WalletA (same as csv-trigger user column).
+    args: ["0xb6b120d2c68fd0920be9df90bc4c7cde69f11828", "1000", "1"]
+
+repeat: 50
+interval_ms: 0
+gas: 5000000
+gas_tip_gwei: 1

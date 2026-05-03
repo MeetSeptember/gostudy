@@ -1,0 +1,20 @@
+# MevBot Chainspace：四参与方 Flash + UTXO Wallet + 双池；调用 MevBotChainspaceUserClient.startFlashArb(user, borrowAmount, minProfitA)
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-mevbot-chainspace.yaml --private-key "<hex>" --metrics-output ./mevbot-chainspace-trigger-sent.jsonl
+#
+# 部署：Flash MY_INDEX=0、Wallet MY_INDEX=1、Pool1 MY_INDEX=2、Pool2 MY_INDEX=3；各 setUserClient(UserClient, shard)；
+# Pool2 储备宜与 Pool1 错价以使 aOut2 > repayDue（否则 early finalize）。feeBps 在 Flash 构造时传入。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"
+    sig: "startFlashArb(address,uint256,uint256)"
+    # 第一个参数须与 MevBotWalletSimulator 已灌账的 user 一致（示例地址请替换）
+    args: ["0x0000000000000000000000000000000000000001", "100000", "0"]
+
+repeat: 10
+interval_ms: 0
+gas: 8000000
+gas_tip_gwei: 1

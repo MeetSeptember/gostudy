@@ -257,7 +257,7 @@ func (ro *RpcOracle) prepareTransactionParams(ctx context.Context, client *ethcl
 	// 2. 这会发送回调，但 requestId 还未注册，导致 "unknown requestId" 错误
 	// 3. EstimateGas 使用二分查找，会多次模拟执行，产生大量重复日志
 	// 4. 跨分片场景下 EstimateGas 不准确，因为会触发真实的跨分片调用
-	const defaultGasLimit = uint64(500000) // 使用默认值，确保复杂调用有足够 gas
+	const defaultGasLimit = uint64(1000000) // 使用默认值，确保复杂调用有足够 gas
 
 	return &txParams{
 		chainID:  chainID,

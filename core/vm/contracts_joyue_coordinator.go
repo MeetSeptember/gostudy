@@ -385,8 +385,9 @@ func (c *joyueCoordinatorPrecompile) getAuthValue(evm *EVM, addr common.Address,
 	return evm.StateDB.GetState(addr, uSlot)
 }
 
-// collectStateOverridesFromBatch1 从 batch1 的 callback 结果收集 StateOverride（guard/delta 失败时返回的权威最新状态）
-func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, coordinatorAddr common.Address, batch1 common.Hash, participants []Participant, details []IntentDetail, retryActive []bool) map[common.Hash][]StateOverride {
+// collectStateOverridesFromBatch1 从 batch1 的 callback 结果收集 StateOverride（guard/delta 失败时返回的权威最新状态）。
+// 第二返回值 strictStaleNoProgress：本 shard 主协调上 STRICT 守卫失败时，若链上最新 (value,version) 与 batch1 回调 Latest* 完全一致，则重试不可能因状态推进而改观，调用方应直接终态失败。
+func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, coordinatorAddr common.Address, batch1 common.Hash, participants []Participant, details []IntentDetail, retryActive []bool) (map[common.Hash][]StateOverride, map[common.Hash]struct{}) {
 	utils.Logger().Info().
 		Str("batch1", batch1.Hex()).
 		Int("participants", len(participants)).
@@ -394,6 +395,7 @@ func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, c
 		Msg("[JOYUE Coordinator] collectStateOverridesFromBatch1: start")
 
 	result := make(map[common.Hash][]StateOverride)
+	strictStaleNoProgress := make(map[common.Hash]struct{})
 	seenByTx := make(map[common.Hash]map[common.Hash]bool) // txHash -> (contractAddr,shardId,key) 去重
 
 	for pIdx, participant := range participants {
@@ -412,6 +414,9 @@ func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, c
 				continue
 			}
 			txHash := details[i].TxHash
+			if _, abort := strictStaleNoProgress[txHash]; abort {
+				continue
+			}
 			if seenByTx[txHash] == nil {
 				seenByTx[txHash] = make(map[common.Hash]bool)
 			}
@@ -423,23 +428,47 @@ func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, c
 			if gr.GuardFailed && int(gr.FailedGuardIndex) < len(details[i].Guards) {
 				g := &details[i].Guards[gr.FailedGuardIndex]
 				key := stateOverrideKey(g.ContractAddr, g.ShardId, gr.LatestKey)
-				if !seen[key] && gr.LatestVal != nil {
+				useLocalCoordinator := g.ContractAddr == coordinatorAddr && g.ShardId == evm.Context.ShardID
+				var ovVal *big.Int
+				var ovVer uint64
+				if useLocalCoordinator {
+					// 本 shard 主协调合约：从当前 EVM 读最新可用量与版本（与 verifyAtomicGuard 的 getUint flag=1 一致），避免 batch1 回调 Latest* 滞后
+					vh, ver := c.getUint(evm, coordinatorAddr, g.Key, 1)
+					ovVal = new(big.Int).SetBytes(vh.Bytes())
+					ovVer = ver
+					if g.Strategy == STRATEGY_STRICT && gr.LatestVal != nil && ovVal.Cmp(gr.LatestVal) == 0 && ovVer == gr.LatestVer {
+						strictStaleNoProgress[txHash] = struct{}{}
+						delete(result, txHash)
+						utils.Logger().Info().
+							Str("txHash", txHash.Hex()).
+							Str("key", gr.LatestKey.Hex()).
+							Str("value", ovVal.String()).
+							Uint64("version", ovVer).
+							Msg("[JOYUE Coordinator] collectStateOverridesFromBatch1: STRICT local coordinator state matches callback, retry pointless")
+						continue
+					}
+				} else if gr.LatestVal != nil {
+					ovVal = gr.LatestVal
+					ovVer = gr.LatestVer
+				}
+				if !seen[key] && ovVal != nil {
 					seen[key] = true
 					result[txHash] = append(result[txHash], StateOverride{
 						ContractAddr: g.ContractAddr,
 						ShardId:      g.ShardId,
 						Key:          gr.LatestKey,
-						Value:        gr.LatestVal,
-						Version:      gr.LatestVer,
+						Value:        ovVal,
+						Version:      ovVer,
 					})
 					utils.Logger().Info().
 						Str("txHash", txHash.Hex()).
 						Str("source", "guard").
+						Bool("localCoordinatorRefresh", useLocalCoordinator).
 						Str("contractAddr", g.ContractAddr.Hex()).
 						Uint32("shardId", g.ShardId).
 						Str("key", gr.LatestKey.Hex()).
-						Str("value", gr.LatestVal.String()).
-						Uint64("version", gr.LatestVer).
+						Str("value", ovVal.String()).
+						Uint64("version", ovVer).
 						Msg("[JOYUE Coordinator] collectStateOverridesFromBatch1: added guard override")
 				}
 			}
@@ -458,23 +487,35 @@ func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, c
 				}
 				if d != nil {
 					key := stateOverrideKey(d.ContractAddr, d.ShardId, dr.LatestKey)
-					if !seen[key] && dr.LatestVal != nil {
+					useLocalCoordinator := d.ContractAddr == coordinatorAddr && d.ShardId == evm.Context.ShardID
+					var ovVal *big.Int
+					var ovVer uint64
+					if useLocalCoordinator {
+						vh, ver := c.getUint(evm, coordinatorAddr, d.Key, 1)
+						ovVal = new(big.Int).SetBytes(vh.Bytes())
+						ovVer = ver
+					} else if dr.LatestVal != nil {
+						ovVal = dr.LatestVal
+						ovVer = dr.LatestVer
+					}
+					if !seen[key] && ovVal != nil {
 						seen[key] = true
 						result[txHash] = append(result[txHash], StateOverride{
 							ContractAddr: d.ContractAddr,
 							ShardId:      d.ShardId,
 							Key:          dr.LatestKey,
-							Value:        dr.LatestVal,
-							Version:      dr.LatestVer,
+							Value:        ovVal,
+							Version:      ovVer,
 						})
 						utils.Logger().Info().
 							Str("txHash", txHash.Hex()).
 							Str("source", "delta").
+							Bool("localCoordinatorRefresh", useLocalCoordinator).
 							Str("contractAddr", d.ContractAddr.Hex()).
 							Uint32("shardId", d.ShardId).
 							Str("key", dr.LatestKey.Hex()).
-							Str("value", dr.LatestVal.String()).
-							Uint64("version", dr.LatestVer).
+							Str("value", ovVal.String()).
+							Uint64("version", ovVer).
 							Msg("[JOYUE Coordinator] collectStateOverridesFromBatch1: added delta override")
 					}
 				}
@@ -493,8 +534,9 @@ func (c *joyueCoordinatorPrecompile) collectStateOverridesFromBatch1(evm *EVM, c
 	utils.Logger().Info().
 		Int("txCount", len(result)).
 		Int("totalOverrides", totalOverrides).
+		Int("strictStaleAbort", len(strictStaleNoProgress)).
 		Msg("[JOYUE Coordinator] collectStateOverridesFromBatch1: done")
-	return result
+	return result, strictStaleNoProgress
 }
 
 func stateOverrideKey(addr common.Address, shardId uint32, key common.Hash) common.Hash {
@@ -3565,7 +3607,26 @@ func (c *joyueCoordinatorPrecompile) processSecondAttemptMatrix(evm *EVM, contra
 	}
 
 	// 从 batch1 的 callback 结果收集 StateOverride（guard/delta 失败时返回的权威最新状态）
-	stateOverridesByTx := c.collectStateOverridesFromBatch1(evm, coordinatorAddr, batch1, participants, details, retryActive)
+	stateOverridesByTx, strictStaleNoProgress := c.collectStateOverridesFromBatch1(evm, coordinatorAddr, batch1, participants, details, retryActive)
+
+	var fastFailTxHashes []common.Hash // 重试立即失败的交易（含 STRICT 状态未推进）
+	for i := range details {
+		if !retryActive[i] {
+			continue
+		}
+		if _, stale := strictStaleNoProgress[details[i].TxHash]; !stale {
+			continue
+		}
+		d := &details[i]
+		retryActive[i] = false
+		done[i] = true
+		finals[i] = FinalResult{TxHash: d.TxHash, Status: 1, AttemptsUsed: 2}
+		fastFailTxHashes = append(fastFailTxHashes, d.TxHash)
+		delete(stateOverridesByTx, d.TxHash)
+		utils.Logger().Info().
+			Str("txHash", d.TxHash.Hex()).
+			Msg("[JOYUE Coordinator] processSecondAttemptMatrix: STRICT guard unchanged vs batch1 callback, terminal retry fail")
+	}
 
 	// 若 agentOnSameShard 已设置，对每个 retry tx 调用 Agent.recomputeIntent 获取新 guards/deltas（传入 stateOverrides 优先于缓存）
 	retryOverrideMap := make(map[common.Hash]retryOverride)
@@ -3575,7 +3636,6 @@ func (c *joyueCoordinatorPrecompile) processSecondAttemptMatrix(evm *EVM, contra
 		Str("coordinatorAddr", coordinatorAddr.Hex()).
 		Msg("[JOYUE Coordinator] processSecondAttemptMatrix: agentOnSameShard")
 
-	var fastFailTxHashes []common.Hash  // 重试立即失败的交易
 	var trueRetryTxHashes []common.Hash // 真正继续重试的交易
 
 	if agentOnSameShard != (common.Address{}) {
@@ -3601,7 +3661,12 @@ func (c *joyueCoordinatorPrecompile) processSecondAttemptMatrix(evm *EVM, contra
 			}
 		}
 	} else {
-		trueRetryTxHashes = retryTxHashes
+		for _, h := range retryTxHashes {
+			if _, stale := strictStaleNoProgress[h]; stale {
+				continue
+			}
+			trueRetryTxHashes = append(trueRetryTxHashes, h)
+		}
 	}
 
 	// =========================================================================

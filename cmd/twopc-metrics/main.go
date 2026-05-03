@@ -1,16 +1,29 @@
 /*
-2PC Metrics - 2PC 跨分片事务指标采集工具
+2PC Metrics — 统一采集各类 2PC Coordinator 的「开始 / 提交 / 中止」相关日志
 
-功能：
-- 轮询链上事件：TwoPCCommitted、TwoPCAborted（Coordinator 发出）
-- 输出 completion_type、success、block 时间等，可与 trigger 的 JSONL 离线关联
+完成事件（写入 CSV/JSONL，可与 joyue-trigger JSONL 按 tx_id 关联）：
+  - TwoPhaseCoordinator：TwoPCCommitted(bytes32)、TwoPCAborted(bytes32)
+  - PeerTransferCoordinator2PC：PeerTransfer2PCCommitted(bytes32)、PeerTransfer2PCAborted(bytes32)
+  - PeerAmmSwapCoordinator2PC：PeerAmmSwap2PCCommitted(bytes32)、PeerAmmSwap2PCAborted(bytes32)
+  - PeerNftPurchaseCoordinator2PC：PeerNftPurchase2PCCommitted(bytes32)、PeerNftPurchase2PCAborted(bytes32)
+  - PeerMevArbCoordinator2PC：PeerMevArb2PCCommitted(bytes32)、PeerMevArb2PCAborted(bytes32)
 
-Coordinator 仅存在于某一分片，故只需轮询该分片。
+调试（--debug）额外扫「已开始」事件，便于确认链上是否触发 2PC：
+  - TwoPCStarted(bytes32,bytes32,uint256,address)
+  - PeerTransfer2PCStarted(bytes32,address,address,uint256)
+  - PeerAmmSwap2PCStarted(bytes32,address,uint256,uint256)
+  - PeerNftPurchase2PCStarted(bytes32,address,uint256,uint256)
+  - PeerMevArb2PCStarted(bytes32,address,uint256,uint256)
 
-使用方式：
-  twopc-metrics --rpc http://127.0.0.1:9500 --coordinator 0x... --output ./2pc-metrics.csv --from-block 0
+单分片：
+
+	twopc-metrics --rpc http://127.0.0.1:9500 --coordinator 0x... --output ./2pc-metrics.csv --from-block 0
+
+多分片（每键一个 Coordinator 地址）：
+
+	twopc-metrics --rpcs 0=http://127.0.0.1:9500,1=http://127.0.0.1:9502 \
+	  --coordinators 0=0x...,1=0x... --output ./2pc-metrics.csv --from-block 0
 */
-
 package main
 
 import (
@@ -24,6 +37,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,30 +52,86 @@ var (
 	twoPCStartedSig   = crypto.Keccak256Hash([]byte("TwoPCStarted(bytes32,bytes32,uint256,address)"))
 	twoPCCommittedSig = crypto.Keccak256Hash([]byte("TwoPCCommitted(bytes32)"))
 	twoPCAbortedSig   = crypto.Keccak256Hash([]byte("TwoPCAborted(bytes32)"))
+
+	peerTransfer2PCStartedSig   = crypto.Keccak256Hash([]byte("PeerTransfer2PCStarted(bytes32,address,address,uint256)"))
+	peerTransfer2PCCommittedSig = crypto.Keccak256Hash([]byte("PeerTransfer2PCCommitted(bytes32)"))
+	peerTransfer2PCAbortedSig   = crypto.Keccak256Hash([]byte("PeerTransfer2PCAborted(bytes32)"))
+
+	peerAmmSwap2PCStartedSig   = crypto.Keccak256Hash([]byte("PeerAmmSwap2PCStarted(bytes32,address,uint256,uint256)"))
+	peerAmmSwap2PCCommittedSig = crypto.Keccak256Hash([]byte("PeerAmmSwap2PCCommitted(bytes32)"))
+	peerAmmSwap2PCAbortedSig   = crypto.Keccak256Hash([]byte("PeerAmmSwap2PCAborted(bytes32)"))
+
+	peerNftPurchase2PCStartedSig   = crypto.Keccak256Hash([]byte("PeerNftPurchase2PCStarted(bytes32,address,uint256,uint256)"))
+	peerNftPurchase2PCCommittedSig = crypto.Keccak256Hash([]byte("PeerNftPurchase2PCCommitted(bytes32)"))
+	peerNftPurchase2PCAbortedSig   = crypto.Keccak256Hash([]byte("PeerNftPurchase2PCAborted(bytes32)"))
+
+	peerMevArb2PCStartedSig   = crypto.Keccak256Hash([]byte("PeerMevArb2PCStarted(bytes32,address,uint256,uint256)"))
+	peerMevArb2PCCommittedSig = crypto.Keccak256Hash([]byte("PeerMevArb2PCCommitted(bytes32)"))
+	peerMevArb2PCAbortedSig   = crypto.Keccak256Hash([]byte("PeerMevArb2PCAborted(bytes32)"))
 )
 
 func main() {
-	rpc := flag.String("rpc", "", "Coordinator 所在分片的 RPC URL")
-	coordinator := flag.String("coordinator", "", "Coordinator 合约地址")
-	shardID := flag.String("shard-id", "0", "分片 ID（用于输出）")
+	rpcs := flag.String("rpcs", "", "多分片 RPC：0=http://...,1=http://...")
+	coordinators := flag.String("coordinators", "", "多分片：0=0x...,1=0x...")
+	rpc := flag.String("rpc", "", "单分片：Coordinator 所在分片 RPC")
+	coordinator := flag.String("coordinator", "", "单分片：Coordinator 合约地址")
+	shardID := flag.String("shard-id", "0", "单分片：输出中的 shard_id")
 	output := flag.String("output", "", "输出文件路径（CSV/JSONL）")
 	format := flag.String("format", "csv", "输出格式：csv / jsonl")
-	fromBlock := flag.Uint64("from-block", 0, "起始区块，0 表示从最新开始")
+	fromBlock := flag.Uint64("from-block", 0, "起始区块，0 表示从当前最高块开始")
 	pollInterval := flag.Duration("poll-interval", 2*time.Second, "轮询间隔")
-	debug := flag.Bool("debug", false, "打印调试日志")
+	debug := flag.Bool("debug", false, "打印调试日志（含 Started 类事件）")
 	flag.Parse()
 
-	if *rpc == "" || *coordinator == "" || *output == "" {
-		flag.Usage()
-		log.Fatal("缺少必填参数：--rpc, --coordinator, --output")
+	rpcMulti := strings.TrimSpace(*rpcs)
+	coordMulti := strings.TrimSpace(*coordinators)
+	rpcSingle := strings.TrimSpace(*rpc)
+	coordSingle := strings.TrimSpace(*coordinator)
+
+	if rpcMulti == "" && rpcSingle != "" && looksLikeShardRPCList(rpcSingle) {
+		log.Printf("[WARN] 多分片 RPC 应使用 --rpcs；已自动从 --rpc 解析")
+		rpcMulti, rpcSingle = rpcSingle, ""
+	}
+	if rpcMulti != "" && coordMulti == "" && coordSingle != "" && strings.Contains(coordSingle, "=") {
+		log.Printf("[WARN] 多分片协调者应使用 --coordinators；已自动从 --coordinator 解析")
+		coordMulti, coordSingle = coordSingle, ""
+	}
+
+	rpcMap := make(map[string]string)
+	coordMap := make(map[string]common.Address)
+
+	if rpcMulti != "" {
+		if coordMulti == "" {
+			flag.Usage()
+			log.Fatal("多分片需同时指定 --rpcs 与 --coordinators")
+		}
+		rpcMap = parseKv(rpcMulti)
+		coordMap = parseAddrMap(coordMulti)
+		if len(rpcMap) == 0 {
+			log.Fatal("--rpcs 解析失败")
+		}
+	} else {
+		if rpcSingle == "" || coordSingle == "" || *output == "" {
+			flag.Usage()
+			log.Fatal("单分片：--rpc、--coordinator、--output 必填；或多分片用 --rpcs + --coordinators")
+		}
+		sid := strings.TrimSpace(*shardID)
+		if sid == "" {
+			sid = "0"
+		}
+		rpcMap[sid] = rpcSingle
+		coordMap[sid] = common.HexToAddress(coordSingle)
+	}
+
+	if *output == "" {
+		log.Fatal("缺少 --output")
 	}
 	if *format != "csv" && *format != "jsonl" {
 		log.Fatalf("--format 必须为 csv 或 jsonl，当前为 %q", *format)
 	}
 
-	coordAddr := common.HexToAddress(*coordinator)
-	log.Printf("[INFO] 2PC metrics 启动: rpc=%s, coordinator=%s, output=%s, format=%s, from-block=%d",
-		*rpc, *coordinator, *output, *format, *fromBlock)
+	log.Printf("[INFO] twopc-metrics 启动: output=%s format=%s from-block=%d shards=%v",
+		*output, *format, *fromBlock, keysOf(rpcMap))
 
 	outFile, err := os.Create(*output)
 	if err != nil {
@@ -72,7 +142,7 @@ func main() {
 	var writer *csv.Writer
 	if *format == "csv" {
 		writer = csv.NewWriter(outFile)
-		writer.Write([]string{"tx_hash", "tx_id", "shard_id", "completion_type", "success", "send_time", "completion_time", "latency_ms", "block_number", "created_at"})
+		_ = writer.Write([]string{"tx_hash", "tx_id", "shard_id", "completion_type", "success", "send_time", "completion_time", "latency_ms", "block_number", "created_at"})
 		writer.Flush()
 	}
 
@@ -87,14 +157,96 @@ func main() {
 	}()
 
 	processed := make(map[string]bool)
-	debugSeenStarted := make(map[string]bool) // 诊断用：已打印的 TwoPCStarted
+	debugSeenStarted := make(map[string]bool)
 	var processedMu sync.Mutex
 	var writeMu sync.Mutex
+	startFrom := *fromBlock
 
-	go poll2PC(ctx, *rpc, *shardID, coordAddr, &processed, &processedMu, &writeMu, writer, *format, outFile, *fromBlock, *pollInterval, *debug, &debugSeenStarted)
+	for sid, rpcURL := range rpcMap {
+		shardKey := sid
+		coordAddr := coordMap[shardKey]
+		if coordAddr == (common.Address{}) {
+			coordAddr = coordMap["0"]
+		}
+		if coordAddr == (common.Address{}) {
+			log.Printf("[WARN] 分片 %s 缺少 coordinator，跳过", shardKey)
+			continue
+		}
+		log.Printf("[INFO] 分片 %s: rpc=%s coordinator=%s", shardKey, rpcURL, coordAddr.Hex())
+		go poll2PC(ctx, rpcURL, shardKey, coordAddr, &processed, &processedMu, &writeMu, writer, *format, outFile, startFrom, *pollInterval, *debug, &debugSeenStarted)
+	}
 
 	<-ctx.Done()
-	log.Println("[INFO] 2PC metrics 已停止")
+	log.Println("[INFO] twopc-metrics 已停止")
+}
+
+func looksLikeShardRPCList(s string) bool {
+	kv := parseKv(s)
+	if len(kv) == 0 {
+		return false
+	}
+	for _, v := range kv {
+		if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+			return false
+		}
+	}
+	return true
+}
+
+func keysOf(m map[string]string) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
+func parseKv(s string) map[string]string {
+	m := make(map[string]string)
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		idx := strings.Index(p, "=")
+		if idx < 0 {
+			continue
+		}
+		k := strings.TrimSpace(p[:idx])
+		v := strings.TrimSpace(p[idx+1:])
+		if k != "" && v != "" {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+func parseAddrMap(s string) map[string]common.Address {
+	m := make(map[string]common.Address)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return m
+	}
+	if !strings.Contains(s, "=") {
+		m["0"] = common.HexToAddress(s)
+		return m
+	}
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		idx := strings.Index(p, "=")
+		if idx < 0 {
+			continue
+		}
+		k := strings.TrimSpace(p[:idx])
+		v := strings.TrimSpace(p[idx+1:])
+		if k != "" && v != "" {
+			m[k] = common.HexToAddress(v)
+		}
+	}
+	return m
 }
 
 func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Address,
@@ -102,7 +254,7 @@ func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Addre
 	fromBlock uint64, pollInterval time.Duration, debug bool, debugSeenStarted *map[string]bool) {
 	client, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
-		log.Printf("[ERROR] 连接 RPC 失败: %v", err)
+		log.Printf("[ERROR] 分片 %s 连接 RPC 失败: %v", shardID, err)
 		return
 	}
 	defer client.Close()
@@ -110,11 +262,11 @@ func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Addre
 	if fromBlock == 0 {
 		bn, err := client.BlockNumber(ctx)
 		if err != nil {
-			log.Printf("[ERROR] 获取 block number 失败: %v", err)
+			log.Printf("[ERROR] 分片 %s 获取 block number 失败: %v", shardID, err)
 			return
 		}
 		fromBlock = bn
-		log.Printf("[INFO] 从区块 %d 开始", fromBlock)
+		log.Printf("[INFO] 分片 %s 从区块 %d 开始", shardID, fromBlock)
 	}
 
 	ticker := time.NewTicker(pollInterval)
@@ -130,21 +282,23 @@ func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Addre
 				continue
 			}
 			if currentBlock < fromBlock {
+				if debug {
+					log.Printf("[DEBUG] 分片 %s 等待块高 current=%d from=%d", shardID, currentBlock, fromBlock)
+				}
 				continue
 			}
 
-			// 诊断：TwoPCStarted 是否有（用于确认 2PC 是否被触发）
 			if debug && debugSeenStarted != nil {
-				queryStarted := ethereum.FilterQuery{
+				qStarted := ethereum.FilterQuery{
 					FromBlock: big.NewInt(int64(fromBlock)),
 					ToBlock:   big.NewInt(int64(currentBlock)),
 					Addresses: []common.Address{coordAddr},
-					Topics:    [][]common.Hash{{twoPCStartedSig}},
+					Topics:    [][]common.Hash{{twoPCStartedSig, peerTransfer2PCStartedSig, peerAmmSwap2PCStartedSig, peerNftPurchase2PCStartedSig, peerMevArb2PCStartedSig}},
 				}
-				logsStarted, err := client.FilterLogs(ctx, queryStarted)
-				if err == nil && len(logsStarted) > 0 {
-					for _, l := range logsStarted {
-						key := fmt.Sprintf("%s:%d:%d", l.TxHash.Hex(), l.BlockNumber, l.Index)
+				logsSt, errSt := client.FilterLogs(ctx, qStarted)
+				if errSt == nil && len(logsSt) > 0 {
+					for _, l := range logsSt {
+						key := fmt.Sprintf("dbg:%s:%d:%d", l.TxHash.Hex(), l.BlockNumber, l.Index)
 						processedMu.Lock()
 						seen := (*debugSeenStarted)[key]
 						if !seen {
@@ -158,29 +312,78 @@ func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Addre
 						if len(l.Topics) >= 2 {
 							txId = l.Topics[1].Hex()
 						}
-						log.Printf("[DEBUG] 发现 TwoPCStarted: txId=%s block=%d (若长期无 TwoPCCommitted/Aborted，说明 2PC 未完成)", txId, l.BlockNumber)
+						name := "TwoPCStarted"
+						if l.Topics[0] == peerTransfer2PCStartedSig {
+							name = "PeerTransfer2PCStarted"
+						}
+						if l.Topics[0] == peerAmmSwap2PCStartedSig {
+							name = "PeerAmmSwap2PCStarted"
+						}
+						if l.Topics[0] == peerNftPurchase2PCStartedSig {
+							name = "PeerNftPurchase2PCStarted"
+						}
+						if l.Topics[0] == peerMevArb2PCStartedSig {
+							name = "PeerMevArb2PCStarted"
+						}
+						log.Printf("[DEBUG] 分片 %s 发现 %s: txId=%s block=%d (若长期无 Committed/Aborted 说明 2PC 未完成)", shardID, name, txId, l.BlockNumber)
 					}
 				}
 			}
 
-			// TwoPCCommitted(bytes32 indexed txId)
-			queryCommitted := ethereum.FilterQuery{
+			qFin := ethereum.FilterQuery{
 				FromBlock: big.NewInt(int64(fromBlock)),
 				ToBlock:   big.NewInt(int64(currentBlock)),
 				Addresses: []common.Address{coordAddr},
-				Topics:    [][]common.Hash{{twoPCCommittedSig}},
+				Topics: [][]common.Hash{{
+					twoPCCommittedSig,
+					peerTransfer2PCCommittedSig,
+					peerAmmSwap2PCCommittedSig,
+					peerNftPurchase2PCCommittedSig,
+					peerMevArb2PCCommittedSig,
+					peerAmmSwap2PCStartedSig,
+					peerNftPurchase2PCStartedSig,
+					peerMevArb2PCStartedSig,
+					twoPCAbortedSig,
+					peerTransfer2PCAbortedSig,
+					peerAmmSwap2PCAbortedSig,
+					peerNftPurchase2PCAbortedSig,
+					peerMevArb2PCAbortedSig,
+				}},
 			}
-			logsCommitted, err := client.FilterLogs(ctx, queryCommitted)
+			logsFin, err := client.FilterLogs(ctx, qFin)
 			if err != nil {
-				log.Printf("[WARN] TwoPCCommitted FilterLogs 错误 (区块 %d-%d): %v", fromBlock, currentBlock, err)
+				log.Printf("[WARN] 分片 %s FilterLogs 错误 (区块 %d-%d): %v", shardID, fromBlock, currentBlock, err)
 				continue
 			}
-			for _, l := range logsCommitted {
-				txId := ""
-				if len(l.Topics) >= 2 {
-					txId = l.Topics[1].Hex()
+
+			for _, l := range logsFin {
+				if len(l.Topics) < 2 {
+					continue
 				}
-				key := fmt.Sprintf("commit:%s:%d", txId, l.Index)
+				txID := l.Topics[1]
+				if txID == (common.Hash{}) {
+					continue
+				}
+				txIdHex := txID.Hex()
+
+				if l.Topics[0] == peerAmmSwap2PCStartedSig || l.Topics[0] == peerNftPurchase2PCStartedSig || l.Topics[0] == peerMevArb2PCStartedSig {
+					continue
+				}
+
+				var committed bool
+				var ct uint8
+				switch l.Topics[0] {
+				case twoPCCommittedSig, peerTransfer2PCCommittedSig, peerAmmSwap2PCCommittedSig, peerNftPurchase2PCCommittedSig, peerMevArb2PCCommittedSig:
+					committed = true
+					ct = 1
+				case twoPCAbortedSig, peerTransfer2PCAbortedSig, peerAmmSwap2PCAbortedSig, peerNftPurchase2PCAbortedSig, peerMevArb2PCAbortedSig:
+					committed = false
+					ct = 2
+				default:
+					continue
+				}
+
+				key := fmt.Sprintf("%s:%s:%d:%s", shardID, txIdHex, l.Index, l.Topics[0].Hex())
 				processedMu.Lock()
 				if (*processed)[key] {
 					processedMu.Unlock()
@@ -200,51 +403,42 @@ func poll2PC(ctx context.Context, rpcURL, shardID string, coordAddr common.Addre
 				}
 
 				writeMu.Lock()
-				writeRecord(writer, format, outFile, txId, txId, shardID, 1, true, "", completionTimeStr, "", l.BlockNumber)
+				writeRecord(writer, format, outFile, l.TxHash.Hex(), txIdHex, shardID, ct, committed, "", completionTimeStr, "", l.BlockNumber)
 				writeMu.Unlock()
-				log.Printf("[INFO] 写入 TwoPCCommitted: txId=%s block=%d", txId, l.BlockNumber)
-			}
 
-			// TwoPCAborted(bytes32 indexed txId)
-			queryAborted := ethereum.FilterQuery{
-				FromBlock: big.NewInt(int64(fromBlock)),
-				ToBlock:   big.NewInt(int64(currentBlock)),
-				Addresses: []common.Address{coordAddr},
-				Topics:    [][]common.Hash{{twoPCAbortedSig}},
-			}
-			logsAborted, err := client.FilterLogs(ctx, queryAborted)
-			if err != nil {
-				log.Printf("[WARN] TwoPCAborted FilterLogs 错误 (区块 %d-%d): %v", fromBlock, currentBlock, err)
-				continue
-			}
-			for _, l := range logsAborted {
-				txId := ""
-				if len(l.Topics) >= 2 {
-					txId = l.Topics[1].Hex()
+				evName := "TwoPCCommitted"
+				if !committed {
+					evName = "TwoPCAborted"
 				}
-				key := fmt.Sprintf("abort:%s:%d", txId, l.Index)
-				processedMu.Lock()
-				if (*processed)[key] {
-					processedMu.Unlock()
-					continue
+				if l.Topics[0] == peerTransfer2PCCommittedSig || l.Topics[0] == peerTransfer2PCAbortedSig {
+					if committed {
+						evName = "PeerTransfer2PCCommitted"
+					} else {
+						evName = "PeerTransfer2PCAborted"
+					}
 				}
-				(*processed)[key] = true
-				processedMu.Unlock()
-
-				block, _ := client.BlockByNumber(ctx, big.NewInt(int64(l.BlockNumber)))
-				completionTime := int64(0)
-				if block != nil && block.Time() > 0 {
-					completionTime = int64(block.Time()) * 1000
+				if l.Topics[0] == peerAmmSwap2PCCommittedSig || l.Topics[0] == peerAmmSwap2PCAbortedSig {
+					if committed {
+						evName = "PeerAmmSwap2PCCommitted"
+					} else {
+						evName = "PeerAmmSwap2PCAborted"
+					}
 				}
-				completionTimeStr := ""
-				if completionTime > 0 {
-					completionTimeStr = strconv.FormatInt(completionTime, 10)
+				if l.Topics[0] == peerNftPurchase2PCCommittedSig || l.Topics[0] == peerNftPurchase2PCAbortedSig {
+					if committed {
+						evName = "PeerNftPurchase2PCCommitted"
+					} else {
+						evName = "PeerNftPurchase2PCAborted"
+					}
 				}
-
-				writeMu.Lock()
-				writeRecord(writer, format, outFile, txId, txId, shardID, 2, false, "", completionTimeStr, "", l.BlockNumber)
-				writeMu.Unlock()
-				log.Printf("[INFO] 写入 TwoPCAborted: txId=%s block=%d", txId, l.BlockNumber)
+				if l.Topics[0] == peerMevArb2PCCommittedSig || l.Topics[0] == peerMevArb2PCAbortedSig {
+					if committed {
+						evName = "PeerMevArb2PCCommitted"
+					} else {
+						evName = "PeerMevArb2PCAborted"
+					}
+				}
+				log.Printf("[INFO] 分片 %s 写入 %s: txId=%s block=%d", shardID, evName, txIdHex, l.BlockNumber)
 			}
 
 			fromBlock = currentBlock + 1
@@ -265,7 +459,7 @@ func writeRecord(writer *csv.Writer, format string, outFile *os.File, txHash, tx
 	switch format {
 	case "csv":
 		if writer != nil {
-			writer.Write([]string{txHash, txId, shardID, strconv.Itoa(int(completionType)), successStr, sendTimeStr, completionTimeStr, latencyStr, strconv.FormatUint(blockNum, 10), strconv.FormatInt(createdAt, 10)})
+			_ = writer.Write([]string{txHash, txId, shardID, strconv.Itoa(int(completionType)), successStr, sendTimeStr, completionTimeStr, latencyStr, strconv.FormatUint(blockNum, 10), strconv.FormatInt(createdAt, 10)})
 			writer.Flush()
 		}
 	case "jsonl":
@@ -282,8 +476,7 @@ func writeRecord(writer *csv.Writer, format string, outFile *os.File, txHash, tx
 				"block_number":    blockNum,
 				"created_at":      createdAt,
 			}
-			enc := json.NewEncoder(outFile)
-			enc.Encode(rec)
+			_ = json.NewEncoder(outFile).Encode(rec)
 		}
 	default:
 		log.Printf("[WARN] 未知 format=%q，跳过写入", format)

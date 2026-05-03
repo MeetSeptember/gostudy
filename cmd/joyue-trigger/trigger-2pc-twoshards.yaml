@@ -1,34 +1,136 @@
-# 2PC 双分片：两个分片同时触发 buyFruit，Coordinator 在 shard 0
-# 需要两个 Relayer：shard0 监听并转发 batchVerifyAndFreeze，shard1 监听并转发 callbacks
-# 若出现 "fromBlock > latest" 或只有第一组完成：检查链是否出块、Relayer 是否都启动
+# 2PC 双分片示例（可配 TwoPhaseCoordinator buyFruit / PeerTransferCoordinator2PC / PeerAmmSwapCoordinator2PC 等）
+# 需要 Relayer：跨分片 prepare/commit/abort（预编译 0x6D / Executor 0x74）
+#
+# 重要（见 joyue-trigger main.go）：目标地址必须写在 **coordinator**，不能写 **agent**。
+#   - coordinator 非空 → is2PC=true → receipt 里按 TwoPCStarted / PeerTransfer2PCStarted / PeerAmmSwap2PCStarted 解析 tx_id
+#   - 若误用 agent → is2PC=false → 只认 JOYUE/Sparrow 的 Intent 类事件，2PC 的 Started 解析不到，JSONL 往往没有 tx_id
+#
+# joyue-trigger 写发送侧 JSONL（需 receipt 里能解析 tx_id）：
+#   - TwoPhaseCoordinator → TwoPCStarted(...)
+#   - PeerTransferCoordinator2PC → PeerTransfer2PCStarted(...)
+#   - PeerAmmSwapCoordinator2PC → PeerAmmSwap2PCStarted(...)
+# 完成侧用 twopc-metrics。
+#
+# 调用示例（建议在 go run 后加 `--`，避免参数被 go 工具吃掉）：
+#   go run ./cmd/joyue-trigger -- -config cmd/joyue-trigger/trigger-2pc-twoshards.yaml -private-key <hex> -metrics-output ./2pc-trigger.jsonl
 
 #shards:
 #  "0":
 #    rpc: http://127.0.0.1:9500
-#    coordinator: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    coordinator: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # shard 0 的 PeerTransferCoordinator2PC 地址
+#    # 已移除 transferRandom；请按 erc20/ERC20.csv 填写 from/to/amount（示例为 CSV 前两行地址）
+#    sig: "startTransfer(address,address,uint256)"
+#    args: ["0xc6715f4044549b175700d9c6c0c097a9ba10259e", "0x2ba777669f25c26bb0fd96d42fc15e4ee3d858a8", "1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    coordinator: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # shard 1 的 Coordinator 地址
+#    sig: "startTransferRandom(uint256)"
+#    args: [ "1" ]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
 #    sig: "buyFruit(string,uint256)"
 #    args: [apple, "1"]
 #  "1":
 #    rpc: http://127.0.0.1:9502
-#    coordinator: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # shard 1 的 Coordinator 地址
-#    sig: "buyBook(string,uint256)"
-#    args: [math, "1"]
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    sig: "buyFruit(string,uint256)"
+#    args: [ apple, "1" ]
+#
+#
+#
+#repeat: 200
+#interval_ms: 0  # 0=不限速
+#gas: 800000
+#gas_tip_gwei: 1
+
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    sig: "transfer(uint256)"
+#    args: ["1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    agent: "0x12a4113F44E5689C93df233008FD805BDc882ABb"  # shard 0 的 Coordinator 地址
+#    sig: "transfer(uint256)"
+#    args: [ "1" ]
+
+
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    agent: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # shard 0 的 Coordinator 地址
+#    sig: "startSwap(address,uint256,uint256)"
+#    args: ["0x...user","10000","1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # shard 1 的 Coordinator 地址
+#    sig: "startSwap(address,uint256,uint256)"
+#    args: ["0x...user","10000","1"]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # PeerAmmSwapCoordinator2PC（或其它 2PC 协调者），勿用 agent
+#    sig: "startSwap(address,uint256,uint256)"
+#    args: ["0x...user", "10000", "1"]
+
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    sig: "buyRandom(uint256)"
+#    args: ["20"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # shard 1 的 Coordinator 地址
+#    sig: "buyRandom(uint256)"
+#    args: [ "20" ]
+
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # PeerAmmSwapCoordinator2PC（或其它 2PC 协调者），勿用 agent
+#    sig: "purchaseRandom(uint256)"
+#    args: ["20"]
+
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    agent: "0xb3D287096764Ee88B761652cdBA8Bb899222e760"  # shard 0 的 Coordinator 地址
+#    sig: "arbRandom(uint256,uint256)"
+#    args: ["1000000000","1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
+#    sig: "arbRandom(uint256,uint256)"
+#    args: ["1000000000","1"]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # PeerAmmSwapCoordinator2PC（或其它 2PC 协调者），勿用 agent
+#    sig: "arbRandom(uint256,uint256)"
+#    args: ["10000000","1"]
+
 
 shards:
   "0":
     rpc: http://127.0.0.1:9500
-    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
-    sig: "buyFruit(string,uint256)"
-    args: [apple, "1"]
-  "1":
-    rpc: http://127.0.0.1:9502
-    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # shard 0 的 Coordinator 地址
-    sig: "buyFruit(string,uint256)"
-    args: [ apple, "1" ]
+    coordinator: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # shard 0 的 Coordinator 地址
+    sig: "startTransfer(address,address,uint256)"
+    args: ["0xda6116a855682e08cfa36f89deb801677e99e2e6","0xac5c3f5f9b0f47bbcc84fb66e3f40128dcdecc44","1"]
 
 
-
-repeat: 200
+repeat: 1
 interval_ms: 0  # 0=不限速
 gas: 800000
 gas_tip_gwei: 1

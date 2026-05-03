@@ -1,0 +1,19 @@
+# Sparrow AMM：直连 SparrowAmmCoordinator.swapWave1（txId=0，完成侧 sparrow-metrics 会跳过 txId==0）
+# clientVersion 须等于链上 SparrowAmmPool.ammVersion()（成功 commit 后版本会自增）
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-amm.yaml --private-key "..." --metrics-output ./sparrow-amm-sent.jsonl
+#
+# 多笔带 intentId 的 swapWave 需链下 batcher 组批；sent 侧由 receipt 中 SparrowWaveStarted 的 txIds[] 写多条 JSONL。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: "0x0000000000000000000000000000000000000000"
+    agent: ""
+    sig: "swapWave1(address,uint256,uint256,uint256)()"
+    args: ["0x0000000000000000000000000000000000000001", "1000", "1", "1"]
+
+repeat: 1
+interval_ms: 0
+gas: 800000
+gas_tip_gwei: 1

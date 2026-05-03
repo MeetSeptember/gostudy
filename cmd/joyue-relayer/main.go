@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/binary"
@@ -33,6 +34,7 @@ JOYUE Relayer - 完全独立的跨分片交易转发服务
 功能：
 - 监听链上的 CrossShardRequest 事件
 - 发送交易到目标分片
+- Agent→Master 仅对 Master.processIntent(bytes) 聚批为 processIntentBatch；Sparrow Wallet 等其它 targetCalldata 一律单笔转发
 
 使用方式：
   go run cmd/joyue-relayer/main.go \
@@ -55,6 +57,9 @@ type CrossShardRequestEvent struct {
 	BlockNumber      uint64
 	LogIndex         uint
 }
+
+// joyueProcessIntentSelector = bytes4(keccak256("processIntent(bytes)"))；仅此类目标调用可参与 Agent→Master 批处理。
+var joyueProcessIntentSelector = crypto.Keccak256([]byte("processIntent(bytes)"))[:4]
 
 // parsedExecutorCall 从 executeAndCallback calldata 解析出的信息（仅 Agent→Master processIntent 格式）
 type parsedExecutorCall struct {
@@ -540,7 +545,8 @@ func (r *Relayer) processBlockLogs(ctx context.Context, blockNum uint64, logs []
 	}
 }
 
-// parseExecuteAndCallbackCalldata 解析 executeAndCallback 格式（仅 Agent→Master processIntent）
+// parseExecuteAndCallbackCalldata 解析 executeAndCallback 格式。
+// 仅当 target 为 Master.processIntent(bytes) 时成功；Sparrow / 其它任意 calldata 返回错误以便走单笔 doSend，避免误聚批为 processIntentBatch。
 func (r *Relayer) parseExecuteAndCallbackCalldata(event *CrossShardRequestEvent) (*parsedExecutorCall, error) {
 	cd := event.Calldata
 	if len(cd) < 228 {
@@ -562,6 +568,12 @@ func (r *Relayer) parseExecuteAndCallbackCalldata(event *CrossShardRequestEvent)
 	}
 	calldataLen := int(calldataLen64)
 	targetCalldata := cd[dataStart+32 : dataStart+32+calldataLen]
+	if len(targetCalldata) < 4 {
+		return nil, fmt.Errorf("targetCalldata too short for selector")
+	}
+	if !bytes.Equal(targetCalldata[:4], joyueProcessIntentSelector) {
+		return nil, fmt.Errorf("not processIntent(bytes), skip batch (selector=%#x)", targetCalldata[:4])
+	}
 	if len(targetCalldata) < 68 {
 		return nil, fmt.Errorf("targetCalldata too short for processIntent")
 	}
@@ -831,7 +843,7 @@ func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestE
 		return
 	}
 
-	const defaultGasLimit = uint64(500000) // 使用默认值
+	const defaultGasLimit = uint64(1000000) // 使用默认值
 
 	// 构建并签名交易
 	tx := harmonytypes.NewTransaction(nonce, event.Target, event.TargetShardID, event.Value, defaultGasLimit, gasPrice, event.Calldata)

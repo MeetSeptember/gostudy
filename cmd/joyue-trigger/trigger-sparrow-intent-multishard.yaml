@@ -1,5 +1,6 @@
 # Sparrow 多分片意图流：与 JOYUE 类似，一个 trigger 并行向 shard0 / shard1 的 IntentShop 发交易。
-# 需在各分片部署 IntentShop；并运行 sparrow-batcher（--rpcs + --intent-shops + --coordinators）。
+# 需在各分片部署 IntentShop；并运行 sparrow-transfer-batcher（--rpcs + --intent-shops + --coordinators）。
+# 注意：新版 SparrowTransferIntentShop 已弃用 transferIntentRandom（会 revert）；请改为 transferIntentExplicit(address,address,uint256) 或改用 csv-trigger -scenario wallet-sparrow。
 #
 # joyue-trigger --config cmd/joyue-trigger/trigger-sparrow-intent-multishard.yaml \
 #   --private-key "..." --metrics-output ./sparrow-sent.jsonl
@@ -11,16 +12,34 @@ shards:
     rpc: http://127.0.0.1:9500
     coordinator: ""
     agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # Shard0 SparrowIntentShop
-    sig: "buyFruitIntentByName(string,uint256)()"
-    args: ["apple", "1"]
-  "1":
-    rpc: http://127.0.0.1:9502
-    coordinator: ""
-    agent: "0x63169D7049Fa7cfA842179AeC59CED7B00B32733"  # Shard1 SparrowIntentShop
-    sig: "buyFruitIntentByName(string,uint256)()"
-    args: ["apple", "1"]
+    sig: "transferIntentRandom(uint256)()"
+    args: ["1"]
+#  "1":
+#    rpc: http://127.0.0.1:9502
+#    coordinator: ""
+#    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"  # Shard1 SparrowIntentShop
+#    sig: "transferIntentRandom(uint256)()"
+#    args: ["1"]
 
-repeat: 100
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: ""
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # Shard0 SparrowIntentShop
+#    sig: "swapIntentRandom(uint256,uint256)()"
+#    args: ["1000","1"]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: ""
+#    agent: "0x61a049be2326C44637b6d6AfdF92480f67DCf076"  # Shard0 SparrowIntentShop
+#    sig: "buyNftIntentExplicit(address,uint256)"
+#    args: ["0x...","20"]
+
+
+
+repeat: 200
 interval_ms: 0
 gas: 400000
 gas_tip_gwei: 1

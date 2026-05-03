@@ -1,0 +1,25 @@
+# NFT Chainspace：调用 NftPurchaseChainspaceUserClient.startPurchase(buyer, quantity)（内部随机 listing + 为该 buyer 自动选足额 ACTIVE note）
+# Payment 须先 bootstrap mintInitialBatch（与 chainspace 同 ABI）；各 Simulator 已 setUserClient。
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-nft-chainspace.yaml --private-key "<hex>" --metrics-output ./nft-chainspace-trigger-sent.jsonl
+#
+# 与 trigger-chainspace.yaml 相同约定：
+#   - coordinator 留空；目标合约写在 agent，避免 is2PC=true。
+#   - metrics-output 的 tx_id：收据中 NftChainspaceIntentStarted 的 Topics[1]（与 chainspace-metrics 轮询的 NftChainspaceIntentFinalized 同键）。
+#
+# 部署替换：
+#   - shards."0".agent → NftPurchaseChainspaceUserClient 地址（须与 RPC 所在分片一致）。
+#   - args[0] 为已灌 note 的 buyer；quantity 与 listing 库存、note 面值匹配。
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"
+    sig: "startPurchase(address,uint256)"
+    args: ["0x0000000000000000000000000000000000000001", "1"]
+
+repeat: 200
+interval_ms: 0
+gas: 5000000
+gas_tip_gwei: 1

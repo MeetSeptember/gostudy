@@ -1,0 +1,58 @@
+# Chainspace：调用 ChainspaceUserClient.transferLine（UTXO 钱包 + 跨分片提交 Simulator）
+#
+# joyue-trigger --config cmd/joyue-trigger/trigger-chainspace.yaml --private-key "<hex>" --metrics-output ./chainspace-trigger-sent.jsonl
+#
+# 规范要点（与 trigger-sparrow-intent.yaml 一致）：
+#   - coordinator 必须留空；目标合约写在 agent，避免 is2PC=true（否则 receipt 只扫 2PCStarted，取不到 tx_id）。
+#   - metrics-output 的 tx_id：来自收据中的 ChainspaceIntentStarted（intentId）；完成事件为回调交易中的 ChainspaceIntentFinalized（chainspace-metrics 轮询 UserClient 同键）。
+#
+# 部署替换：
+#   - shards."0".agent → 本机 ChainspaceUserClient 地址（须与 walletShardId、RPC 所在分片一致）。
+#   - rpc → UserClient 所在分片 HTTP RPC。
+#
+# 初始化 note：Simulator 部署后账本为空；对 Simulator 地址执行
+#   go run ./cmd/bootstrap-wallet-balances-from-csv -kind chainspace -wallet <Simulator> -csv ... -balance <面值> -batch 20
+# 再调 UserClient.transferLine(address,address,uint256)（勿再用 transferLine(uint256)，已 revert）。
+# amount 不得超过付款方某张 ACTIVE note 的面值。
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: ""
+#    agent: "0x81ac14c04310feDFeC065997f07E83d934659ae7"
+#    sig: "transferLine(uint256)"
+#    args: ["1"]
+
+shards:
+  "0":
+    rpc: http://127.0.0.1:9500
+    coordinator: ""
+    agent: "0x12a4113F44E5689C93df233008FD805BDc882ABb"
+    sig: "startPurchaseRandom(uint256)"
+    args: ["20"]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: ""
+#    agent: "0x12a4113F44E5689C93df233008FD805BDc882ABb"
+#    sig: "startSwapRandom(uint256,uint256)"
+#    args: ["1000", "0"]
+
+#shards:
+#  "0":
+#    rpc: http://127.0.0.1:9500
+#    coordinator: ""
+#    agent: "0x12a4113F44E5689C93df233008FD805BDc882ABb"
+#    sig: "startFlashArb(address,uint256,uint256)"
+#    args: ["100000", "0"]
+
+
+repeat: 50
+interval_ms: 0
+gas: 500000
+gas_tip_gwei: 1
+
+# --- 显式 from/to 时可改为（两地址须为 PeerSimulatedUsers 派生地址；与上面 shards 二选一）---
+#     sig: "transferLine(address,address,uint256)"
+#     args: ["0x<from>", "0x<to>", "10"]

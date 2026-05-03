@@ -1,7 +1,8 @@
 /*
-Sparrow Metrics — SparrowCoordinator 完成事件采集
+Sparrow Metrics — Sparrow 系协调者完成事件采集
 
-轮询 SparrowWaveFinished(bytes32 indexed txId, bool committed)；txId==0（buyFruitWave1/2 测试）跳过，不参与指标。
+轮询 SparrowWaveFinished(bytes32 indexed txId, bool committed)；txId==0（buyFruitWave1/2 / buyNftWave1/2 测试）跳过，不参与指标。
+SparrowCoordinator、SparrowAmmCoordinator、SparrowNftCoordinator、SparrowMevArbCoordinator 事件签名相同（SparrowWaveFinished），仅需把 --coordinator 指向对应部署地址。
 与 joyue-trigger / batcher 的 sent JSONL 按 tx_id、shard_id 离线合并。
 
 单分片（与旧版兼容）：
