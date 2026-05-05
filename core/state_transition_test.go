@@ -93,7 +93,7 @@ func TestCollectGas(t *testing.T) {
 	header.SetEpoch(new(big.Int).Set(params.LocalnetChainConfig.FeeCollectEpoch))
 
 	// Init localnet configs
-	shardingconfig.InitLocalnetConfig(16, 16)
+	shardingconfig.InitLocalnetConfig(16, 16, 0)
 
 	// set the shard schedule so that fee collectors are available
 	shard.Schedule = shardingconfig.LocalnetSchedule
@@ -220,7 +220,7 @@ func TestPrepare(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	chain, db, header, _ := getTestEnvironment(*key)
 	header.SetEpoch(new(big.Int).Set(params.LocalnetChainConfig.FeeCollectEpoch))
-	shardingconfig.InitLocalnetConfig(16, 16)
+	shardingconfig.InitLocalnetConfig(16, 16, 0)
 
 	// set the shard schedule so that fee collectors are available
 	shard.Schedule = shardingconfig.LocalnetSchedule

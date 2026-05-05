@@ -218,6 +218,22 @@ func TestLocalSyncingPeerProvider(t *testing.T) {
 		_, err := p.SyncingPeers(999)
 		assert.Error(t, err)
 	})
+	t.Run("FourShardsSkipsSelfByP2PPort", func(t *testing.T) {
+		// Matches test/configs/local-resharding-{4,8,16}.txt: 7 validators + explorer, stride 32 on sync ports.
+		p := NewLocalSyncingPeerProvider(6000, 9000, 4, 7)
+		peers, err := p.SyncingPeers(0)
+		if !assert.NoError(t, err) {
+			return
+		}
+		ports := make([]string, len(peers))
+		for i := range peers {
+			ports[i] = peers[i].Port
+		}
+		assert.NotContains(t, ports, "6000", "first shard-0 validator sync port should be skipped when self P2P is 9000")
+		assert.Contains(t, ports, "6004")
+		assert.Contains(t, ports, "6028")
+		assert.Len(t, ports, 7)
+	})
 }
 
 func makeLocalSyncingPeerProvider() *LocalSyncingPeerProvider {

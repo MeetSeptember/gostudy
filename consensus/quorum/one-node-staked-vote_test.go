@@ -137,7 +137,7 @@ func TestQuorumThreshold(t *testing.T) {
 
 func TestEvenNodes(t *testing.T) {
 	// Init localnet configs
-	shardingconfig.InitLocalnetConfig(16, 16)
+	shardingconfig.InitLocalnetConfig(16, 16, 0)
 	reward.UpdateLocalnetTotalPreStakingNetworkRewards()
 
 	stakedVote, result, _, sKeys := setupBaseCase()

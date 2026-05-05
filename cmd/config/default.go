@@ -187,6 +187,7 @@ var defaultConsensusConfig = harmonyconfig.ConsensusConfig{
 var defaultLocalnetConfig = harmonyconfig.LocalnetConfig{
 	BlocksPerEpoch:   16,
 	BlocksPerEpochV2: 16,
+	NumShards:        2,
 }
 
 var defaultPrometheusConfig = harmonyconfig.PrometheusConfig{

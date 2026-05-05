@@ -106,6 +106,7 @@ func GetDefaultLocalnetConfig() harmonyconfig.LocalnetConfig {
 	localnetConfig := harmonyconfig.LocalnetConfig{
 		BlocksPerEpoch:   nodeconfig.GetDefaultLocalnetBlocksPerEpoch(),
 		BlocksPerEpochV2: nodeconfig.GetDefaultLocalnetBlocksPerEpochV2(),
+		NumShards:        2,
 	}
 	return localnetConfig
 }

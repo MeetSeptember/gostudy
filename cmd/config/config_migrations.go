@@ -461,6 +461,9 @@ func init() {
 		if confTree.Get("Localnet.LocalnetBlocksPerEpochV2") == nil {
 			confTree.Set("Localnet.LocalnetBlocksPerEpochV2", defaultConfig.Localnet.BlocksPerEpochV2)
 		}
+		if confTree.Get("Localnet.NumShards") == nil {
+			confTree.Set("Localnet.NumShards", defaultConfig.Localnet.NumShards)
+		}
 		// upgrade minor version because of `Cache` network introduction
 		confTree.Set("Version", "2.6.4")
 		return confTree

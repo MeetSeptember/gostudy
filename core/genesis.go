@@ -138,12 +138,8 @@ func NewGenesisSpec(netType nodeconfig.NetworkType, shardID uint32) *Genesis {
 			testAddress := common.HexToAddress("0xA5241513DA9F4463F1d4874b548dFBAC29D91f34")
 			genesisAlloc[testAddress] = GenesisAccount{Balance: contractDeployerFunds}
 
-			// JOYUE Relayer 账号（relayer-shard0 / relayer-shard1）
-			relayerAddresses := []common.Address{
-				internalcommon.MustBech32ToAddress("one1lylsfclkm6q575dyg4ue47vdcyad6q0d4kge45"), // relayer-shard0
-				internalcommon.MustBech32ToAddress("one1jq3ut362u970xzt9yqls7e2tq096wd6wkl4td4"), // relayer-shard1
-			}
-			for _, addr := range relayerAddresses {
+			// JOYUE Relayer 账号：按 localnet 分片数预充值（与 core/genesis/localnet_joyue_relayers.go 一致）
+			for _, addr := range genesis.LocalnetJoyueRelayerFundingAddresses(int(shardingconfig.TryGetLocalnetNumShards())) {
 				genesisAlloc[addr] = GenesisAccount{Balance: contractDeployerFunds}
 			}
 		}

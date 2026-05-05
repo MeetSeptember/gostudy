@@ -8,7 +8,7 @@ import (
 )
 
 func TestLocalnetEpochCalculation(t *testing.T) {
-	InitLocalnetConfig(16, 16)
+	shardingconfig.InitLocalnetConfig(16, 16, 0)
 
 	//test config init
 	lnConfig := GetLocalnetConfig()

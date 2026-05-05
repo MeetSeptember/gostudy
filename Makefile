@@ -12,7 +12,7 @@ RPMBUILD=$(HOME)/rpmbuild
 DEBBUILD=$(HOME)/debbuild
 SHELL := bash
 
-.PHONY: all help libs exe race trace-pointer debug debug-ext debug-kill test test-go test-api test-api-attach linux_static deb_init deb_build deb debpub_dev debpub_prod rpm_init rpm_build rpm rpmpub_dev rpmpub_prod clean distclean docker go-vet go-test docker build_localnet_validator protofiles travis_go_checker travis_rpc_checker travis_rosetta_checker debug-start-log debug-stop-log debug-restart-log debug-delete-log
+.PHONY: all help libs exe race trace-pointer debug debug-4 debug-8 debug-16 debug-ext debug-kill test test-go test-api test-api-attach linux_static deb_init deb_build deb debpub_dev debpub_prod rpm_init rpm_build rpm rpmpub_dev rpmpub_prod clean distclean docker go-vet go-test docker build_localnet_validator protofiles travis_go_checker travis_rpc_checker travis_rosetta_checker debug-start-log debug-stop-log debug-restart-log debug-delete-log
 
 all: libs
 	bash ./scripts/go_executable_build.sh -S
@@ -24,6 +24,7 @@ help:
 	@echo "race - build the harmony binary & bootnode with race condition checks"
 	@echo "trace-pointer - build the harmony binary & bootnode with pointer analysis"
 	@echo "debug - start a localnet with 2 shards (s0 rpc endpoint = localhost:9700; s1 rpc endpoint = localhost:9800)"
+	@echo "debug-4 / debug-8 / debug-16 - same as debug but 4/8/16 shards (uses test/configs/local-resharding-{4,8,16}.txt and SHARDS=N)"
 	@echo "debug-kill - force kill the localnet"
 	@echo "debug-multi-bls - start a localnet with external validators and multi-BLS keys in the background"
 	@echo "debug-multi-bls-with-terminal - start a localnet with external validators and multi-BLS keys using screen, providing real-time logs and automatic cleanup on exit"
@@ -86,6 +87,18 @@ debug:
 	# add VERBOSE=true before bash or run `export VERBOSE=true` on the shell level for have max logging
 	# add LEGACY_SYNC=true before bash  or run `export LEGACY_SYNC=true` on the shell level to switch to the legacy sync
 	bash ./test/debug.sh ./test/configs/local-resharding.txt
+
+debug-4:
+	rm -rf .dht-127.0.0.1*
+	SHARDS=4 bash ./test/debug.sh ./test/configs/local-resharding-4.txt
+
+debug-8:
+	rm -rf .dht-127.0.0.1*
+	SHARDS=8 bash ./test/debug.sh ./test/configs/local-resharding-8.txt
+
+debug-16:
+	rm -rf .dht-127.0.0.1*
+	SHARDS=16 bash ./test/debug.sh ./test/configs/local-resharding-16.txt
 
 debug-kill:
 	bash ./test/kill_node.sh

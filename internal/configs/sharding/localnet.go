@@ -3,6 +3,7 @@ package shardingconfig
 import (
 	"fmt"
 	"math/big"
+	"strings"
 
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/harmony-one/harmony/internal/params"
@@ -154,15 +155,47 @@ func (ls localnetSchedule) GetNetworkID() NetworkID {
 	return LocalNet
 }
 
+// BuildLocalnetJoyueOtherShardRPCs builds joyue.other-shard-rpcs for localnet (HTTP RPC 9500+2*shard).
+func BuildLocalnetJoyueOtherShardRPCs(numShards uint32) string {
+	numShards = NormalizeLocalnetNumShards(numShards)
+	if numShards < 2 {
+		numShards = 2
+	}
+	var b strings.Builder
+	for i := uint32(0); i < numShards; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		port := 9500 + 2*i
+		fmt.Fprintf(&b, "%d=http://127.0.0.1:%d", i, port)
+	}
+	return b.String()
+}
+
 // GetShardingStructure is the sharding structure for localnet.
+// For the classic 2-shard layout (test/configs/local-resharding.txt), entrypoint
+// HTTP/WS ports follow 9500+2*shard / 9800+2*shard (first validator P2P 9000+2*shard, +500/+800).
+// For 4/8/16 shards (test/configs/local-resharding-{4,8,16}.txt), each shard’s first validator
+// P2P is 9000+shard*((NumNodesPerShard+1)*4); HTTP/WS use the same stride from 9500/9800.
 func (ls localnetSchedule) GetShardingStructure(numShard, shardID int) []map[string]interface{} {
 	res := []map[string]interface{}{}
+	httpAt := func(shardIdx int) int { return 9500 + 2*shardIdx }
+	wsAt := func(shardIdx int) int { return 9800 + 2*shardIdx }
+	if numShard != 2 {
+		slots := ls.InstanceForEpoch(big.NewInt(0)).NumNodesPerShard() + 1
+		if slots < 2 {
+			slots = 2
+		}
+		stride := slots * 4
+		httpAt = func(shardIdx int) int { return 9500 + shardIdx*stride }
+		wsAt = func(shardIdx int) int { return 9800 + shardIdx*stride }
+	}
 	for i := 0; i < numShard; i++ {
 		res = append(res, map[string]interface{}{
 			"current": int(shardID) == i,
 			"shardID": i,
-			"http":    fmt.Sprintf("http://127.0.0.1:%d", 9500+2*i),
-			"ws":      fmt.Sprintf("ws://127.0.0.1:%d", 9800+2*i),
+			"http":    fmt.Sprintf("http://127.0.0.1:%d", httpAt(i)),
+			"ws":      fmt.Sprintf("ws://127.0.0.1:%d", wsAt(i)),
 		})
 	}
 	return res
@@ -179,22 +212,104 @@ func (ls localnetSchedule) RewardFrequency() uint64 {
 }
 
 func InitLocalnetInstances() {
+	n := GetLocalnetConfig().NumShards
+	if n == 0 {
+		n = 2
+	}
+	n = NormalizeLocalnetNumShards(n)
+
+	if n == 2 {
+		localnetV0 = MustNewInstance(
+			2, 7, 5, 0,
+			numeric.OneDec(), genesis.LocalHarmonyAccounts,
+			genesis.LocalFnAccounts, emptyAllowlist, nil,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
+		)
+		localnetV1 = MustNewInstance(
+			2, 8, 5, 0,
+			numeric.OneDec(), genesis.LocalHarmonyAccountsV1,
+			genesis.LocalFnAccountsV1, emptyAllowlist, nil,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
+		)
+		localnetV2 = MustNewInstance(
+			2, 9, 6, 0,
+			numeric.MustNewDecFromStr("0.68"),
+			genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+			emptyAllowlist, nil,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
+		)
+		localnetV3 = MustNewInstance(
+			2, 9, 6, 0,
+			numeric.MustNewDecFromStr("0.68"),
+			genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+			emptyAllowlist, nil,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
+		)
+		localnetV3_1 = MustNewInstance(
+			2, 9, 6, 0,
+			numeric.MustNewDecFromStr("0.68"),
+			genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+			emptyAllowlist, nil,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
+		)
+		localnetV3_2 = MustNewInstance(
+			2, 9, 6, 0,
+			numeric.MustNewDecFromStr("0.68"),
+			genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+			emptyAllowlist, feeCollectorsLocalnet,
+			numeric.ZeroDec(), ethCommon.Address{},
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
+		)
+		localnetV4 = MustNewInstance(
+			2, 9, 6, 0, numeric.MustNewDecFromStr("0.68"),
+			genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+			emptyAllowlist, feeCollectorsLocalnet,
+			numeric.MustNewDecFromStr("0.25"), hip30CollectionAddressLocalnet,
+			localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
+		)
+		return
+	}
+
+	// Multi-shard localnet (4/8/16): uniform topology per epoch so genesis committee matches key list length.
+	// 7 nodes per shard, 6 Harmony + 1 FN; requires len(LocalHarmonyAccountsV2) >= 6*N and len(LocalFnAccountsV2) >= N.
+	const nodesPerShard = 7
+	const hmyPerShard = 6
+	needH := int(n) * hmyPerShard
+	needF := int(n) * (nodesPerShard - hmyPerShard)
+	if len(genesis.LocalHarmonyAccountsV2) < needH {
+		panic(fmt.Sprintf(
+			"localnet: need at least %d harmony accounts for %d shards (6 per shard), have %d",
+			needH, n, len(genesis.LocalHarmonyAccountsV2),
+		))
+	}
+	if len(genesis.LocalFnAccountsV2) < needF {
+		panic(fmt.Sprintf(
+			"localnet: need at least %d FN accounts for %d shards (1 per shard), have %d",
+			needF, n, len(genesis.LocalFnAccountsV2),
+		))
+	}
+
 	localnetV0 = MustNewInstance(
-		2, 7, 5, 0,
-		numeric.OneDec(), genesis.LocalHarmonyAccounts,
-		genesis.LocalFnAccounts, emptyAllowlist, nil,
+		n, nodesPerShard, hmyPerShard, 0,
+		numeric.OneDec(), genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+		emptyAllowlist, nil,
 		numeric.ZeroDec(), ethCommon.Address{},
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
 	)
 	localnetV1 = MustNewInstance(
-		2, 8, 5, 0,
-		numeric.OneDec(), genesis.LocalHarmonyAccountsV1,
-		genesis.LocalFnAccountsV1, emptyAllowlist, nil,
+		n, nodesPerShard, hmyPerShard, 0,
+		numeric.OneDec(), genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
+		emptyAllowlist, nil,
 		numeric.ZeroDec(), ethCommon.Address{},
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
 	)
 	localnetV2 = MustNewInstance(
-		2, 9, 6, 0,
+		n, nodesPerShard, hmyPerShard, 0,
 		numeric.MustNewDecFromStr("0.68"),
 		genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
 		emptyAllowlist, nil,
@@ -202,7 +317,7 @@ func InitLocalnetInstances() {
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpochOld(),
 	)
 	localnetV3 = MustNewInstance(
-		2, 9, 6, 0,
+		n, nodesPerShard, hmyPerShard, 0,
 		numeric.MustNewDecFromStr("0.68"),
 		genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
 		emptyAllowlist, nil,
@@ -210,7 +325,7 @@ func InitLocalnetInstances() {
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
 	)
 	localnetV3_1 = MustNewInstance(
-		2, 9, 6, 0,
+		n, nodesPerShard, hmyPerShard, 0,
 		numeric.MustNewDecFromStr("0.68"),
 		genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
 		emptyAllowlist, nil,
@@ -218,7 +333,7 @@ func InitLocalnetInstances() {
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
 	)
 	localnetV3_2 = MustNewInstance(
-		2, 9, 6, 0,
+		n, nodesPerShard, hmyPerShard, 0,
 		numeric.MustNewDecFromStr("0.68"),
 		genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
 		emptyAllowlist, feeCollectorsLocalnet,
@@ -226,7 +341,7 @@ func InitLocalnetInstances() {
 		localnetReshardingEpoch, LocalnetSchedule.BlocksPerEpoch(),
 	)
 	localnetV4 = MustNewInstance(
-		2, 9, 6, 0, numeric.MustNewDecFromStr("0.68"),
+		n, nodesPerShard, hmyPerShard, 0, numeric.MustNewDecFromStr("0.68"),
 		genesis.LocalHarmonyAccountsV2, genesis.LocalFnAccountsV2,
 		emptyAllowlist, feeCollectorsLocalnet,
 		numeric.MustNewDecFromStr("0.25"), hip30CollectionAddressLocalnet,

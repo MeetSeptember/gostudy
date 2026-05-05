@@ -76,6 +76,9 @@ function launch_localnet() {
     --network "${NETWORK}" --blspass file:"${ROOT}/.hmy/blspass.txt" \
     --verbosity "${verbosity}" "--p2p.security.max-conn-per-ip=100" \
     "--localnet.blocks_per_epoch=${BLOCKS_PER_EPOCH}" "--localnet.blocks_per_epoch_v2=${BLOCKS_PER_EPOCH_V2}")
+  if [[ "${NETWORK}" == "localnet" ]]; then
+    base_args+=("--localnet.num_shards=${SHARDS}")
+  fi
   if [ "${LEGACY_SYNC}" == "true" ]; then
     sync_options=("--dns=true" "--sync=false" "--dns.client=true" "--sync.downloader=false" "--sync.stagedsync=false")
   else

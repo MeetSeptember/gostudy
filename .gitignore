@@ -68,7 +68,7 @@ node_modules/
 test/.bnkey
 
 # exported keys
-.hmy/*.key
+#.hmy/*.key
 
 # blspass
 blspass.txt

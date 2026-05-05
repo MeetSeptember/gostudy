@@ -192,11 +192,19 @@ func revert(chain core.BlockChain, hc harmonyconfig.HarmonyConfig) {
 func setupNodeAndRun(hc harmonyconfig.HarmonyConfig) {
 	var err error
 
+	if hc.Network.NetworkType == nodeconfig.Localnet {
+		ns := shardingconfig.NormalizeLocalnetNumShards(hc.Localnet.NumShards)
+		const legacyLocalnetJoyueRPCs = "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502"
+		if ns > 2 && hc.Joyue.OtherShardRPCs == legacyLocalnetJoyueRPCs {
+			hc.Joyue.OtherShardRPCs = shardingconfig.BuildLocalnetJoyueOtherShardRPCs(ns)
+		}
+	}
+
 	nodeconfigSetShardSchedule(hc)
 	nodeconfig.SetShardingSchedule(shard.Schedule)
 	nodeconfig.SetVersion(harmonyConfigs.GetHarmonyVersion())
 
-	shardingconfig.InitLocalnetConfig(hc.Localnet.BlocksPerEpoch, hc.Localnet.BlocksPerEpochV2)
+	shardingconfig.InitLocalnetConfig(hc.Localnet.BlocksPerEpoch, hc.Localnet.BlocksPerEpochV2, hc.Localnet.NumShards)
 
 	if hc.General.NodeType == "validator" {
 		var err error
@@ -238,7 +246,7 @@ func setupNodeAndRun(hc harmonyconfig.HarmonyConfig) {
 	}
 
 	// Init localnet configs
-	shardingconfig.InitLocalnetConfig(hc.Localnet.BlocksPerEpoch, hc.Localnet.BlocksPerEpochV2)
+	shardingconfig.InitLocalnetConfig(hc.Localnet.BlocksPerEpoch, hc.Localnet.BlocksPerEpochV2, hc.Localnet.NumShards)
 	reward.UpdateLocalnetTotalPreStakingNetworkRewards()
 
 	// Update ethereum compatible chain ids

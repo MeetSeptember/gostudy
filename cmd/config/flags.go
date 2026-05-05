@@ -144,6 +144,7 @@ var (
 	localnetFlags = []cli.Flag{
 		localnetBlocksPerEpochFlag,
 		localnetBlocksPerEpochV2Flag,
+		localnetNumShardsFlag,
 	}
 
 	// consensusInvalidFlags are flags that are no longer effective
@@ -601,6 +602,13 @@ func applyLocalnetFlags(cmd *cobra.Command, cfg *harmonyconfig.HarmonyConfig) {
 	}
 	if cli.IsFlagChanged(cmd, localnetBlocksPerEpochV2Flag) {
 		cfg.Localnet.BlocksPerEpochV2 = cli.GetUint64FlagValue(cmd, localnetBlocksPerEpochV2Flag)
+	}
+	if cli.IsFlagChanged(cmd, localnetNumShardsFlag) {
+		v := cli.GetIntFlagValue(cmd, localnetNumShardsFlag)
+		if v < 0 {
+			v = 2
+		}
+		cfg.Localnet.NumShards = uint32(v)
 	}
 }
 
@@ -1273,6 +1281,11 @@ var (
 		Name:     "localnet.blocks_per_epoch_v2",
 		Usage:    "the number of blocks per epoch for localnet (V2)",
 		DefValue: defaultLocalnetConfig.BlocksPerEpochV2,
+	}
+	localnetNumShardsFlag = cli.IntFlag{
+		Name:     "localnet.num_shards",
+		Usage:    "number of shards for localnet (supported: 2, 4, 8, 16; other values default to 2)",
+		DefValue: int(defaultLocalnetConfig.NumShards),
 	}
 )
 
@@ -2306,7 +2319,7 @@ var (
 	}
 	joyueOtherShardRPCsFlag = cli.StringFlag{
 		Name:     "joyue.other-shard-rpcs",
-		Usage:    "其他分片的 RPC 地址（格式：shardID=rpcURL,shardID=rpcURL）",
+		Usage:    "其他分片的 RPC 地址（格式：shardID=rpcURL,...）。localnet 多分片时若仍为默认的 0=9500,1=9502，harmony 启动前会自动扩展为与 --localnet.num_shards 一致",
 		DefValue: "0=http://127.0.0.1:9500,1=http://127.0.0.1:9502",
 	}
 )

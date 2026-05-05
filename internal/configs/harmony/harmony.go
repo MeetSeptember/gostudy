@@ -227,6 +227,8 @@ type ConsensusConfig struct {
 type LocalnetConfig struct {
 	BlocksPerEpoch   uint64
 	BlocksPerEpochV2 uint64
+	// NumShards is the number of shards for localnet (2, 4, 8, or 16). Used only when NetworkType is localnet.
+	NumShards uint32
 }
 
 type BlsConfig struct {

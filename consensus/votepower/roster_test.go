@@ -57,7 +57,7 @@ func generateRandomSlot() shard.Slot {
 
 func TestCompute(t *testing.T) {
 	// Init localnet configs
-	shardingconfig.InitLocalnetConfig(16, 16)
+	shardingconfig.InitLocalnetConfig(16, 16, 0)
 
 	expectedRoster := NewRoster(shard.BeaconChainShardID)
 	// Calculated when generated

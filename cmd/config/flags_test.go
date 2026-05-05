@@ -57,6 +57,7 @@ func TestHarmonyFlags(t *testing.T) {
 				Localnet: harmonyconfig.LocalnetConfig{
 					BlocksPerEpoch:   64,
 					BlocksPerEpochV2: 64,
+					NumShards:        defaultConfig.Localnet.NumShards,
 				},
 				DNSSync: harmonyconfig.DnsSync{
 					Port:       6000,
@@ -231,6 +232,7 @@ func TestLocalnetFlags(t *testing.T) {
 			expConfig: harmonyconfig.LocalnetConfig{
 				BlocksPerEpoch:   defaultConfig.Localnet.BlocksPerEpoch,
 				BlocksPerEpochV2: defaultConfig.Localnet.BlocksPerEpochV2,
+				NumShards:        defaultConfig.Localnet.NumShards,
 			},
 		},
 		{
@@ -238,6 +240,7 @@ func TestLocalnetFlags(t *testing.T) {
 			expConfig: harmonyconfig.LocalnetConfig{
 				BlocksPerEpoch:   64,
 				BlocksPerEpochV2: defaultConfig.Localnet.BlocksPerEpochV2,
+				NumShards:        defaultConfig.Localnet.NumShards,
 			},
 		},
 		{
@@ -245,6 +248,7 @@ func TestLocalnetFlags(t *testing.T) {
 			expConfig: harmonyconfig.LocalnetConfig{
 				BlocksPerEpoch:   defaultConfig.Localnet.BlocksPerEpoch,
 				BlocksPerEpochV2: 64,
+				NumShards:        defaultConfig.Localnet.NumShards,
 			},
 		},
 		{
@@ -252,6 +256,15 @@ func TestLocalnetFlags(t *testing.T) {
 			expConfig: harmonyconfig.LocalnetConfig{
 				BlocksPerEpoch:   64,
 				BlocksPerEpochV2: 64,
+				NumShards:        defaultConfig.Localnet.NumShards,
+			},
+		},
+		{
+			args: []string{"--localnet.num_shards", "8"},
+			expConfig: harmonyconfig.LocalnetConfig{
+				BlocksPerEpoch:   defaultConfig.Localnet.BlocksPerEpoch,
+				BlocksPerEpochV2: defaultConfig.Localnet.BlocksPerEpochV2,
+				NumShards:        8,
 			},
 		},
 	}

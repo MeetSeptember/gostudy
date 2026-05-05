@@ -148,6 +148,10 @@ type LocalSyncingPeerProvider struct {
 	numShards, shardSize uint32
 }
 
+// localnetLegacyTwoShardExplorerOffset is the offset from basePort to the explorer's
+// gRPC sync port in the classic 2-shard local-resharding.txt layout (P2P 912x → sync 612x).
+const localnetLegacyTwoShardExplorerOffset = 120
+
 // NewLocalSyncingPeerProvider returns a provider that synthesizes syncing
 // peers given the network configuration
 func NewLocalSyncingPeerProvider(
@@ -161,33 +165,48 @@ func NewLocalSyncingPeerProvider(
 	}
 }
 
+// localSyncPortsForShard returns gRPC sync ports (same convention as legacysync.GetSyncingPort:
+// syncPort = p2pPort - SyncingPortDifference) for peers in the given shard.
+func (p *LocalSyncingPeerProvider) localSyncPortsForShard(shardID uint32) []int {
+	base := int(p.basePort)
+	if p.numShards == 2 {
+		// Classic interleaved layout (test/configs/local-resharding.txt).
+		ports := make([]int, 0, 4)
+		for k := 0; k < 3; k++ {
+			ports = append(ports, base+2*int(shardID)+4*k)
+		}
+		ports = append(ports, base+localnetLegacyTwoShardExplorerOffset+2*int(shardID))
+		return ports
+	}
+	// Multi-shard: one row per shard in test/configs/local-resharding-{4,8,16}.txt —
+	// shardSize validators + 1 explorer, P2P step 4 → stride (shardSize+1)*4 on sync ports.
+	slots := int(p.shardSize) + 1
+	if slots < 2 {
+		slots = 2
+	}
+	stride := slots * 4
+	ports := make([]int, 0, slots)
+	for k := 0; k < slots; k++ {
+		ports = append(ports, base+int(shardID)*stride+4*k)
+	}
+	return ports
+}
+
 // SyncingPeers returns local syncing peers using the sharding configuration.
 func (p *LocalSyncingPeerProvider) SyncingPeers(shardID uint32) (peers []p2p.Peer, err error) {
 	if shardID >= p.numShards {
 		return nil, errors.Errorf(
 			"shard ID %d out of range 0..%d", shardID, p.numShards-1)
 	}
-	shards := [][]string{
-		{
-			"6000",
-			"6004",
-			"6008",
-			"6120",
-		},
-		{
-			"6002",
-			"6006",
-			"6010",
-			"6122",
-		},
-	}
+	selfP2P := fmt.Sprint(p.selfPort)
+	selfSync := legacysync.GetSyncingPort(selfP2P)
 
-	selfport := fmt.Sprint(p.selfPort)
-	for _, port := range shards[shardID] {
-		if port == selfport {
+	for _, port := range p.localSyncPortsForShard(shardID) {
+		portStr := strconv.Itoa(port)
+		if portStr == selfP2P || (selfSync != "" && portStr == selfSync) {
 			continue // do not sync from self
 		}
-		peers = append(peers, p2p.Peer{IP: "127.0.0.1", Port: fmt.Sprint(port)})
+		peers = append(peers, p2p.Peer{IP: "127.0.0.1", Port: portStr})
 	}
 	return peers, nil
 }
