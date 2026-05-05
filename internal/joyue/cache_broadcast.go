@@ -262,7 +262,7 @@ func (cb *CacheBroadcaster) handleP2PMessages(sub *libp2p_pubsub.Subscription) {
 				key := common.BytesToHash(rawData[25:57])
 				txId := common.BytesToHash(rawData[57:89])
 				cb.Unfreeze(contractAddr, shardId, key, txId)
-				utils.Logger().Info().
+				utils.Logger().Debug().
 					Str("contract", contractAddr.Hex()).Str("key", key.Hex()).
 					Str("txId", txId.Hex()).Str("from", msg.GetFrom().String()).
 					Msg("[JOYUE] received unfreeze message from P2P")
@@ -289,14 +289,14 @@ func (cb *CacheBroadcaster) handleP2PMessages(sub *libp2p_pubsub.Subscription) {
 			// 若 txId 非零，一并解冻
 			if entry.TxId != (common.Hash{}) {
 				cb.Unfreeze(entry.ContractAddr, entry.ShardId, entry.Key, entry.TxId)
-				utils.Logger().Info().
+				utils.Logger().Debug().
 					Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
 					Str("txId", entry.TxId.Hex()).Str("from", msg.GetFrom().String()).
 					Msg("[JOYUE] unfrozen after P2P commit update")
 			}
 
 			valueUint := new(big.Int).SetBytes(entry.Value)
-			utils.Logger().Info().
+			utils.Logger().Debug().
 				Str("contract", entry.ContractAddr.Hex()).
 				Str("key", entry.Key.Hex()).
 				Uint64("version", entry.Version).
@@ -346,7 +346,7 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 			case cb.eventSig, cb.eventSigOld:
 				// StateBroadcast：更新权威缓存 + 解冻（若有 txId）
 				// eventSig：commit 产生（含 txId）；eventSigOld：部署/setState 产生（无 txId）
-				utils.Logger().Info().
+				utils.Logger().Debug().
 					Str("txHash", receipt.TxHash.Hex()).
 					Str("logAddress", log.Address.Hex()).
 					Bool("fromDeploy", log.Topics[0] == cb.eventSigOld).
@@ -378,7 +378,7 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 				// 从冻结表中移除该 txId
 				if entry.TxId != (common.Hash{}) {
 					cb.Unfreeze(entry.ContractAddr, entry.ShardId, entry.Key, entry.TxId)
-					utils.Logger().Info().
+					utils.Logger().Debug().
 						Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
 						Str("txId", entry.TxId.Hex()).
 						Msg("[JOYUE] ProcessBlockLogs: unfrozen after commit (StateBroadcast)")
@@ -391,7 +391,7 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 						Msg("[JOYUE] failed to broadcast cache update immediately")
 				} else {
 					valueUint := new(big.Int).SetBytes(entry.Value)
-					utils.Logger().Info().
+					utils.Logger().Debug().
 						Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
 						Str("cacheKey", cacheKey).Uint64("version", entry.Version).
 						Str("txId", entry.TxId.Hex()).
@@ -401,7 +401,7 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 
 			case cb.unfreezeSig:
 				// StateUnfreeze：仅从冻结表解冻，不更新权威缓存
-				utils.Logger().Info().
+				utils.Logger().Debug().
 					Str("txHash", receipt.TxHash.Hex()).
 					Str("logAddress", log.Address.Hex()).
 					Msg("[JOYUE] ProcessBlockLogs: found StateUnfreeze event")
@@ -415,7 +415,7 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 
 				shardId := cb.nodeConfig.ShardID
 				cb.Unfreeze(contractAddr, shardId, key, txId)
-				utils.Logger().Info().
+				utils.Logger().Debug().
 					Str("contract", contractAddr.Hex()).Str("key", key.Hex()).
 					Str("txId", txId.Hex()).
 					Msg("[JOYUE] ProcessBlockLogs: unfrozen after rollback (StateUnfreeze)")
@@ -633,7 +633,7 @@ func (cb *CacheBroadcaster) updateLocalCache(entry *CacheEntry) {
 		// 缓存不存在，直接设置
 		valueUint := new(big.Int).SetBytes(entry.Value)
 		cb.cache.Set(key, entry)
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("key", key).
 			Str("contract", entry.ContractAddr.Hex()).
 			Uint64("version", entry.Version).
@@ -645,7 +645,7 @@ func (cb *CacheBroadcaster) updateLocalCache(entry *CacheEntry) {
 		valueUint := new(big.Int).SetBytes(entry.Value)
 		existingValueUint := new(big.Int).SetBytes(existing.Value)
 		cb.cache.Set(key, entry)
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("key", key).
 			Str("contract", entry.ContractAddr.Hex()).
 			Uint64("existingVersion", existing.Version).
@@ -676,7 +676,7 @@ func (cb *CacheBroadcaster) updateLocalCache(entry *CacheEntry) {
 		// 版本更低，拒绝更新（保护本地更新不被低版本 P2P 消息覆盖）
 		valueUint := new(big.Int).SetBytes(entry.Value)
 		existingValueUint := new(big.Int).SetBytes(existing.Value)
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("key", key).
 			Str("contract", entry.ContractAddr.Hex()).
 			Uint64("existingVersion", existing.Version).
@@ -826,7 +826,7 @@ func (cb *CacheBroadcaster) GetCache(contractAddr common.Address, shardId uint32
 
 	entry, exists := cb.cache.Get(cacheKey)
 	if !exists {
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("cacheKey", cacheKey).
 			Str("contract", contractAddr.Hex()).
 			Uint32("shardId", shardId).
@@ -836,7 +836,7 @@ func (cb *CacheBroadcaster) GetCache(contractAddr common.Address, shardId uint32
 	}
 
 	valueUint := new(big.Int).SetBytes(entry.Value)
-	utils.Logger().Info().
+	utils.Logger().Debug().
 		Str("cacheKey", cacheKey).
 		Str("contract", contractAddr.Hex()).
 		Uint32("shardId", shardId).
@@ -893,7 +893,7 @@ func (cb *CacheBroadcaster) SetCacheLocal(contractAddr common.Address, shardId u
 			Value:        value,
 			Version:      version,
 		})
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("cacheKey", cacheKey).
 			Str("contract", contractAddr.Hex()).
 			Str("key", key.Hex()).
@@ -912,7 +912,7 @@ func (cb *CacheBroadcaster) SetCacheLocal(contractAddr common.Address, shardId u
 			Value:        value,
 			Version:      version,
 		})
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("cacheKey", cacheKey).
 			Str("contract", contractAddr.Hex()).
 			Str("key", key.Hex()).
@@ -934,7 +934,7 @@ func (cb *CacheBroadcaster) SetCacheLocal(contractAddr common.Address, shardId u
 				Value:        value,
 				Version:      version,
 			})
-			utils.Logger().Info().
+			utils.Logger().Debug().
 				Str("cacheKey", cacheKey).
 				Str("contract", contractAddr.Hex()).
 				Str("key", key.Hex()).
@@ -954,7 +954,7 @@ func (cb *CacheBroadcaster) SetCacheLocal(contractAddr common.Address, shardId u
 		// 版本更低，拒绝更新（保护高版本缓存不被低版本覆盖）
 		valueUint := new(big.Int).SetBytes(value)
 		existingValueUint := new(big.Int).SetBytes(existing.Value)
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("cacheKey", cacheKey).
 			Str("contract", contractAddr.Hex()).
 			Str("key", key.Hex()).
@@ -998,7 +998,7 @@ func (cb *CacheBroadcaster) GetAvailable(contractAddr common.Address, shardId ui
 	result := make([]byte, 32)
 	available.FillBytes(result)
 
-	utils.Logger().Info().
+	utils.Logger().Debug().
 		Str("contract", contractAddr.Hex()).
 		Uint32("shardId", shardId).
 		Str("key", key.Hex()).
@@ -1061,7 +1061,7 @@ func (cb *CacheBroadcaster) Freeze(contractAddr common.Address, shardId uint32, 
 		txMap[txId] = new(big.Int).Set(amount)
 	}
 
-	utils.Logger().Info().
+	utils.Logger().Debug().
 		Str("contract", contractAddr.Hex()).
 		Str("key", key.Hex()).
 		Str("txId", txId.Hex()).
@@ -1092,7 +1092,7 @@ func (cb *CacheBroadcaster) Unfreeze(contractAddr common.Address, shardId uint32
 		delete(cb.freezeTable, cacheKey)
 	}
 
-	utils.Logger().Info().
+	utils.Logger().Debug().
 		Str("contract", contractAddr.Hex()).
 		Str("key", key.Hex()).
 		Str("txId", txId.Hex()).

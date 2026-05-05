@@ -319,7 +319,7 @@ func (c *joyueCacheWritePrecompile) RunWriteCapable(evm *EVM, contract *Contract
 		txId := common.BytesToHash(input[96:128])
 		amount := new(big.Int).SetBytes(input[128:160])
 
-		utils.Logger().Info().
+		utils.Logger().Debug().
 			Str("contract", contractAddr.Hex()).
 			Uint32("shardId", shardId).
 			Str("key", key.Hex()).
@@ -343,7 +343,7 @@ func (c *joyueCacheWritePrecompile) RunWriteCapable(evm *EVM, contract *Contract
 	version := binary.BigEndian.Uint64(input[152:160])
 
 	valueUint := new(big.Int).SetBytes(valueCopy)
-	utils.Logger().Info().
+	utils.Logger().Debug().
 		Str("contract", contractAddr.Hex()).
 		Uint32("shardId", shardId).
 		Str("key", key.Hex()).
