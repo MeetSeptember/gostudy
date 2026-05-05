@@ -1,8 +1,9 @@
 #!/bin/bash
-# 开发容器端口映射：兼容 classic 2 分片（HTTP 9500/9502 步长 2）与
-# local-resharding-{4,8,16}.txt（首节点 HTTP/WS 步长 32，16 分片末片 HTTP 约 9980，
-# 单节点 P2P 最高可到 9xxx 末段，HTTP 可达 10000+）。
-# 可按需改 IMAGE / 挂载路径。
+# 开发容器：仅映射常用离散端口（兼容 2 分片交错 + 4/8/16 分片首节点 stride=32）。
+# 若要从宿主机连「非首节点」的 P2P/RPC，再自行追加 -p 或改下面数组。
+#
+# 环境变量：HARMONY_DEV_IMAGE（默认 harmony-dev）、HARMONY_DEV_CONTAINER、
+# HARMONY_DEV_MOUNT、HARMONY_DEV_MOUNT_DST 同前。
 
 set -euo pipefail
 
@@ -11,15 +12,31 @@ NAME="${HARMONY_DEV_CONTAINER:-harmony-node}"
 MOUNT_SRC="${HARMONY_DEV_MOUNT:-$(pwd)}"
 MOUNT_DST="${HARMONY_DEV_MOUNT_DST:-/root/go/src/github.com/harmony-one/harmony}"
 
-# HTTP RPC：覆盖 9500–约 10180（16 分片首节点 9980 + 余量）；含 9501(auth)、9524/9526 等常见偏移
-HTTP_LO=9500
-HTTP_HI=10180
-# WebSocket：与 HTTP 同 stride，16 分片约 10280
-WS_LO=9800
-WS_HI=10500
-# P2P（localnet deploy 首段 9000 起、多分片块布局）
-P2P_LO=9000
-P2P_HI=9660
+# --- 各分片「首 validator」HTTP（P2P+500）；16 片：9500 + i*32，i=0..15 ---
+http_ports=(
+	9500 9532 9564 9596 9628 9660 9692 9724 9756 9788 9820 9852 9884 9916 9948 9980
+	9502
+	9501
+	9598 9599
+	9524 9526
+)
+# --- 对应 WS（P2P+800）；2 分片多一个 9802 ---
+ws_ports=(
+	9800 9832 9864 9896 9928 9960 9992 10024 10056 10088 10120 10152 10184 10216 10248 10280
+	9802
+	9898 9899
+)
+# --- 首节点 P2P（9000 + i*32）+ 2 分片第二片首节点 9002 ---
+p2p_ports=(
+	9000 9032 9064 9096 9128 9160 9192 9224 9256 9288 9320 9352 9384 9416 9448 9480
+	9002
+)
+
+docker_ports=()
+for p in "${http_ports[@]}"; do docker_ports+=(-p "${p}:${p}"); done
+for p in "${ws_ports[@]}";  do docker_ports+=(-p "${p}:${p}"); done
+for p in "${p2p_ports[@]}"; do docker_ports+=(-p "${p}:${p}"); done
+docker_ports+=(-p 8888:8888 -p 8889:8889 -p 19876:19876)
 
 echo "=== 步骤 1: 停止并删除当前容器 ==="
 docker stop "${NAME}" 2>/dev/null || true
@@ -27,34 +44,23 @@ docker rm "${NAME}" 2>/dev/null || true
 echo "✅ 容器已停止并删除"
 echo ""
 
-echo "=== 步骤 2: 创建容器（端口范围兼容 2/4/8/16 分片；9598/9599 等在 HTTP 范围内）==="
-# 范围映射：宿主机与容器同一区间（勿再对区间内端口单独 -p，以免 Docker 冲突）
+echo "=== 步骤 2: 创建容器（离散端口：HTTP ${#http_ports[@]} + WS ${#ws_ports[@]} + P2P ${#p2p_ports[@]} + bootnode）==="
 if docker run -d -it --name "${NAME}" \
-  -p "${HTTP_LO}-${HTTP_HI}:${HTTP_LO}-${HTTP_HI}" \
-  -p "${WS_LO}-${WS_HI}:${WS_LO}-${WS_HI}" \
-  -p "${P2P_LO}-${P2P_HI}:${P2P_LO}-${P2P_HI}" \
-  -p 8888:8888 \
-  -p 8889:8889 \
-  -p 19876:19876 \
-  -v "${MOUNT_SRC}:${MOUNT_DST}" \
-  "${IMAGE}" /bin/bash
+	"${docker_ports[@]}" \
+	-v "${MOUNT_SRC}:${MOUNT_DST}" \
+	"${IMAGE}" /bin/bash
 then
-  echo "✅ 容器已创建：${NAME}（镜像 ${IMAGE}）"
-  echo ""
-  echo "已映射：HTTP ${HTTP_LO}-${HTTP_HI}，WS ${WS_LO}-${WS_HI}，P2P ${P2P_LO}-${P2P_HI}；bootnode 8888/8889/19876（9598/9599/9898/9899 已含在 HTTP/WS 范围内）"
-  echo ""
-  echo "=== 步骤 3: 进入容器 ==="
-  echo "  docker exec -it ${NAME} bash"
-  echo ""
-  echo "容器内示例："
-  echo "  make debug              # 2 分片 local-resharding.txt"
-  echo "  make debug-4            # 4 分片"
-  echo "  VERBOSE=true make debug-8"
-  echo ""
-  echo "=== 步骤 4: 宿主机 curl 示例（RPC HTTP）==="
-  echo "  2 分片 shard1:  curl -sS -X POST http://127.0.0.1:9502 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"hmy_shardId\",\"params\":[],\"id\":1}'"
-  echo "  4 分片 shard1:  curl -sS -X POST http://127.0.0.1:9532 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"hmy_shardId\",\"params\":[],\"id\":1}'"
+	echo "✅ 容器已创建：${NAME}（镜像 ${IMAGE}）"
+	echo ""
+	echo "=== 步骤 3: 进入容器 ==="
+	echo "  docker exec -it ${NAME} bash"
+	echo ""
+	echo "容器内：make debug | make debug-4 | make debug-8 | make debug-16"
+	echo ""
+	echo "=== 宿主机 curl 示例 ==="
+	echo "  2 分片 shard1 HTTP: 9502"
+	echo "  4 分片 shard1 HTTP: 9532"
 else
-  echo "❌ 容器创建失败"
-  exit 1
+	echo "❌ 容器创建失败"
+	exit 1
 fi
