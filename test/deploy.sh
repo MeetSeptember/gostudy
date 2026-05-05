@@ -179,7 +179,8 @@ EXAMPLES:
 
 DURATION=60000
 MIN=4
-SHARDS=2
+# 允许 Makefile / 环境注入 SHARDS（如 make debug-4）；未设置时默认为 2
+: "${SHARDS:=2}"
 DRYRUN=
 NETWORK=localnet
 VERBOSE=false
