@@ -24,6 +24,12 @@ func buildLocalnetJoyueRelayerAll() {
 	out = append(out,
 		internalcommon.MustBech32ToAddress("one1lylsfclkm6q575dyg4ue47vdcyad6q0d4kge45"),
 		internalcommon.MustBech32ToAddress("one1jq3ut362u970xzt9yqls7e2tq096wd6wkl4td4"),
+		internalcommon.MustBech32ToAddress("one1ddvsh3xpj6zkjfveazw5wpnfw4wynar24pxx4k"),
+		internalcommon.MustBech32ToAddress("one14djrp3nrh2pg5gksvm6jcuh299teu9xf3fhwel"),
+		internalcommon.MustBech32ToAddress("one1lg9mv8fsupjga5x9d2h4v58pldmxjyzschqg2p"),
+		internalcommon.MustBech32ToAddress("one1gxx4vd429jle8acff2hraud4hyf508r3skhjua"),
+		internalcommon.MustBech32ToAddress("one13pz6hwkntv5pzml5fnxgpytd4tajjps2n5lq39"),
+		internalcommon.MustBech32ToAddress("one1fy8ahmf8dzvp30eg0uk9zkq5xft009cyejaa3c"),
 	)
 	curveN := crypto.S256().Params().N
 	for i := 2; i < 16; i++ {
