@@ -91,7 +91,8 @@ type Relayer struct {
 	clientTimeout time.Duration
 	sendLockMap   sync.Map // targetShardID -> *sync.Mutex，按分片加锁，多 Sender 可并行发往不同分片
 
-	sendNonceCache map[uint32]uint64 // targetShardID -> next nonce
+	sendNonceCache   map[uint32]uint64 // targetShardID -> next nonce
+	sendNonceCacheMu sync.Mutex        // 保护 sendNonceCache（多 Sender / go sendTransaction 并发写 map 会 fatal）
 
 	ethClient       *ethclient.Client
 	rpcURL          string
@@ -827,9 +828,10 @@ func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestE
 	}
 
 	targetShardID := event.TargetShardID
+	r.sendNonceCacheMu.Lock()
 	nonce, hasCached := r.sendNonceCache[targetShardID]
+	r.sendNonceCacheMu.Unlock()
 	if !hasCached {
-		var err error
 		nonce, err = client.PendingNonceAt(ctx, from)
 		if err != nil {
 			log.Printf("[ERROR] failed to get nonce: %v", err)
@@ -874,10 +876,14 @@ func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestE
 	err = rpcClient.CallContext(ctx, &txHash, "hmy_sendRawTransaction", hexutil.Bytes(encodedTx))
 	if err != nil {
 		log.Printf("[ERROR] failed to send transaction via RPC: %v", err)
+		r.sendNonceCacheMu.Lock()
 		delete(r.sendNonceCache, targetShardID)
+		r.sendNonceCacheMu.Unlock()
 		return
 	}
+	r.sendNonceCacheMu.Lock()
 	r.sendNonceCache[targetShardID] = nonce + 1
+	r.sendNonceCacheMu.Unlock()
 
 	log.Printf("[INFO] Sent transaction successfully (txHash: %s, requestId: %d, targetShard: %d, target: %s, nonce: %d)",
 		signedTx.Hash().Hex(), event.RequestID, event.TargetShardID, event.Target.Hex(), nonce)
