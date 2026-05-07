@@ -17,7 +17,7 @@ func init() {
 func buildLocalnetGeneralPurposeFundingAll() {
 	out := make([]ethcommon.Address, 0, 8)
 	out = append(out,
-		internalcommon.MustBech32ToAddress("one1fy8ahmf8dzvp30eg0uk9zkq5xft009cyejaa3c"),
+		internalcommon.MustBech32ToAddress("one10t38r4qsnmn8xl2vwue2hf7ej9hwnx3jnx84v2"),
 		// 在此追加更多通用预充值 one1… 地址。
 	)
 	localnetGeneralPurposeFundingAll = out
