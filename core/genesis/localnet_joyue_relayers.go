@@ -12,7 +12,7 @@ import (
 )
 
 // localnetJoyueRelayerAll 为 localnet Joyue Relayer 预充值地址（最多 16 分片）。
-// 前两个与历史 2 分片配置一致；索引 2–15 由确定性种子派生 ECDSA，便于文档化私钥与 cmd/joyue-relayer 对齐。
+// 前 7 条为固定 bech32（与历史 2 分片前两条一致并扩展）；其后为 HMY_JOYUE_RELAYER 确定性 ECDSA（i=2..15），与 cmd/joyue-relayer 私钥派生一致。
 var localnetJoyueRelayerAll []ethcommon.Address
 
 func init() {

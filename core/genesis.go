@@ -141,6 +141,11 @@ func NewGenesisSpec(netType nodeconfig.NetworkType, shardID uint32) *Genesis {
 			for _, addr := range genesis.LocalnetJoyueRelayerFundingAddresses(int(shardingconfig.TryGetLocalnetNumShards())) {
 				genesisAlloc[addr] = GenesisAccount{Balance: contractDeployerFunds}
 			}
+
+			// Localnet 通用账户（与分片数无关；仅 bech32 列表见 core/genesis/localnet_general_account.go）
+			for _, addr := range genesis.LocalnetGeneralPurposeFundingAddresses() {
+				genesisAlloc[addr] = GenesisAccount{Balance: contractDeployerFunds}
+			}
 		}
 	}
 
