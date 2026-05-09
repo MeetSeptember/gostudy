@@ -41,7 +41,10 @@ JOYUE Relayer - 完全独立的跨分片交易转发服务
     --rpc http://127.0.0.1:9500 \
     --shard-id 0 \
     --private-key 0x... \
-    --target-shard-rpcs 1=http://127.0.0.1:9502,2=http://127.0.0.1:9504
+    --target-shard-rpcs 1=http://127.0.0.1:9502,2=http://127.0.0.1:9504 \
+    --gas-limit 3000000
+
+转发子交易默认 gas 较大（与 chainspace / 多腿 prepare 同量级）；高压仍 OOG 时可再调高 --gas-limit。
 */
 
 // CrossShardRequestEvent 跨分片请求事件
@@ -108,6 +111,7 @@ type Relayer struct {
 	concurrent   bool
 	numSenders   int                          // concurrent=1 时 Sender 协程数
 	maxBatchSize int                          // Agent→Master 聚合时每批最多多少个（0=不限制）
+	gasLimit     uint64                       // 发往目标分片的子交易 gas limit（固定值，与 calldata 复杂度相关）
 	logsCh       chan []ethtypes.Log          // Queue 1: Poller → Worker
 	sendCh       chan *CrossShardRequestEvent // Queue 2: Worker → Sender（concurrent=1 时）
 	pollerWg     sync.WaitGroup
@@ -119,7 +123,7 @@ type Relayer struct {
 // concurrent: 0=顺序模式（2PC 安全），1=并发模式（JOYUE 高吞吐，Poller 不阻塞）
 // numSenders: concurrent=1 时 Sender 协程数，多 Sender 可并行发往不同分片
 // maxBatchSize: Agent→Master 聚合时每批最多多少个，0=不限制
-func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32, targetShardRPCs string, concurrent bool, numSenders int, maxBatchSize int) (*Relayer, error) {
+func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32, targetShardRPCs string, concurrent bool, numSenders int, maxBatchSize int, gasLimit uint64) (*Relayer, error) {
 	// 解析私钥
 	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
@@ -169,13 +173,17 @@ func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32,
 		numSenders = 1
 	}
 
-	log.Printf("[INFO] Relayer created (address: %s, source shard: %d, target shards: %d, concurrent=%v, numSenders=%d, maxBatchSize=%d)",
+	if gasLimit == 0 {
+		gasLimit = 3_000_000
+	}
+	log.Printf("[INFO] Relayer created (address: %s, source shard: %d, target shards: %d, concurrent=%v, numSenders=%d, maxBatchSize=%d, gasLimit=%d)",
 		crypto.PubkeyToAddress(privateKey.PublicKey).Hex(),
 		sourceShardID,
 		len(shardRPCs),
 		concurrent,
 		numSenders,
-		maxBatchSize)
+		maxBatchSize,
+		gasLimit)
 
 	return &Relayer{
 		privateKey:      privateKey,
@@ -193,6 +201,7 @@ func NewRelayer(privateKeyHex string, sourceRPCURL string, sourceShardID uint32,
 		concurrent:      concurrent,
 		numSenders:      numSenders,
 		maxBatchSize:    maxBatchSize,
+		gasLimit:        gasLimit,
 		logsCh:          logsCh,
 		sendCh:          sendCh,
 	}, nil
@@ -845,10 +854,8 @@ func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestE
 		return
 	}
 
-	const defaultGasLimit = uint64(1000000) // 使用默认值
-
-	// 构建并签名交易
-	tx := harmonytypes.NewTransaction(nonce, event.Target, event.TargetShardID, event.Value, defaultGasLimit, gasPrice, event.Calldata)
+	// 构建并签名交易（gas 由 --gas-limit 配置；chainspace / 多腿 prepare 易超过 1M）
+	tx := harmonytypes.NewTransaction(nonce, event.Target, event.TargetShardID, event.Value, r.gasLimit, gasPrice, event.Calldata)
 	signer := harmonytypes.NewEIP155Signer(chainID)
 	signedTx, err := harmonytypes.SignTx(tx, signer, r.privateKey)
 	if err != nil {
@@ -885,8 +892,8 @@ func (r *Relayer) sendTransaction(ctx context.Context, event *CrossShardRequestE
 	r.sendNonceCache[targetShardID] = nonce + 1
 	r.sendNonceCacheMu.Unlock()
 
-	log.Printf("[INFO] Sent transaction successfully (txHash: %s, requestId: %d, targetShard: %d, target: %s, nonce: %d)",
-		signedTx.Hash().Hex(), event.RequestID, event.TargetShardID, event.Target.Hex(), nonce)
+	log.Printf("[INFO] Sent transaction successfully (txHash: %s, requestId: %d, targetShard: %d, target: %s, nonce: %d, gasLimit: %d)",
+		signedTx.Hash().Hex(), event.RequestID, event.TargetShardID, event.Target.Hex(), nonce, r.gasLimit)
 }
 
 func main() {
@@ -900,6 +907,7 @@ func main() {
 		concurrent      = flag.Int("concurrent", 0, "0=顺序模式（2PC 安全），1=并发模式（JOYUE 高吞吐）")
 		numSenders      = flag.Int("num-senders", 3, "concurrent=1 时 Sender 协程数，多 Sender 可并行发往不同分片")
 		maxBatchSize    = flag.Int("max-batch-size", 5, "Agent→Master 聚合时每批最多多少个（0=不限制）")
+		gasLimit        = flag.Uint64("gas-limit", 3_000_000, "转发到目标分片的子交易 gas limit（chainspace / MEV bot 等多腿 prepare 建议 ≥2.5M；0 表示使用默认 3M）")
 	)
 
 	flag.Parse()
@@ -909,9 +917,13 @@ func main() {
 	}
 
 	concurrentMode := *concurrent == 1
+	gl := *gasLimit
+	if gl == 0 {
+		gl = 3_000_000
+	}
 
 	// 创建 Relayer
-	relayer, err := NewRelayer(*privateKey, *rpcURL, uint32(*shardID), *targetShardRPCs, concurrentMode, *numSenders, *maxBatchSize)
+	relayer, err := NewRelayer(*privateKey, *rpcURL, uint32(*shardID), *targetShardRPCs, concurrentMode, *numSenders, *maxBatchSize, gl)
 	if err != nil {
 		log.Fatalf("创建 Relayer 失败: %v", err)
 	}
@@ -945,6 +957,7 @@ func main() {
 	log.Printf("  并发模式: %v (0=顺序/2PC, 1=并发/JOYUE)", *concurrent)
 	log.Printf("  Sender 数: %d (concurrent=1 时生效)", *numSenders)
 	log.Printf("  最大批大小: %d (0=不限制)", *maxBatchSize)
+	log.Printf("  子交易 gas limit: %d", gl)
 
 	// 等待中断信号
 	sigChan := make(chan os.Signal, 1)
