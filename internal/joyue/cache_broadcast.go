@@ -269,6 +269,22 @@ func (cb *CacheBroadcaster) handleP2PMessages(sub *libp2p_pubsub.Subscription) {
 				continue
 			}
 
+			if msgType == 0x04 {
+				entries, err := cb.deserializeCacheEntries(rawData)
+				if err != nil {
+					utils.Logger().Error().Err(err).Msg("[JOYUE] failed to deserialize cache entry batch")
+					continue
+				}
+				for _, entry := range entries {
+					cb.applyP2PCacheEntry(entry, msg.GetFrom().String())
+				}
+				utils.Logger().Debug().
+					Int("entries", len(entries)).
+					Str("from", msg.GetFrom().String()).
+					Msg("[JOYUE] received cache update batch from P2P")
+				continue
+			}
+
 			// 权威缓存更新（type=0x01 旧格式 或 type=0x02 新格式含 txId）
 			entry, err := cb.deserializeCacheEntry(rawData)
 			if err != nil {
@@ -276,42 +292,46 @@ func (cb *CacheBroadcaster) handleP2PMessages(sub *libp2p_pubsub.Subscription) {
 				continue
 			}
 
-			if !cb.validateVersion(entry) {
-				utils.Logger().Debug().
-					Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
-					Uint64("version", entry.Version).Str("from", msg.GetFrom().String()).
-					Msg("[JOYUE] rejected cache update (version not newer)")
-				continue
-			}
-
-			cb.updateLocalCache(entry)
-
-			// 若 txId 非零，一并解冻
-			if entry.TxId != (common.Hash{}) {
-				cb.Unfreeze(entry.ContractAddr, entry.ShardId, entry.Key, entry.TxId)
-				utils.Logger().Debug().
-					Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
-					Str("txId", entry.TxId.Hex()).Str("from", msg.GetFrom().String()).
-					Msg("[JOYUE] unfrozen after P2P commit update")
-			}
-
-			valueUint := new(big.Int).SetBytes(entry.Value)
-			utils.Logger().Debug().
-				Str("contract", entry.ContractAddr.Hex()).
-				Str("key", entry.Key.Hex()).
-				Uint64("version", entry.Version).
-				Str("txId", entry.TxId.Hex()).
-				Str("valueUint", valueUint.String()).
-				Int("valueLen", len(entry.Value)).
-				Str("from", msg.GetFrom().String()).
-				Msg("[JOYUE] received cache update from P2P")
+			cb.applyP2PCacheEntry(entry, msg.GetFrom().String())
 		}
 	}
 }
 
+func (cb *CacheBroadcaster) applyP2PCacheEntry(entry *CacheEntry, from string) {
+	if !cb.validateVersion(entry) {
+		utils.Logger().Debug().
+			Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
+			Uint64("version", entry.Version).Str("from", from).
+			Msg("[JOYUE] rejected cache update (version not newer)")
+		return
+	}
+
+	cb.updateLocalCache(entry)
+
+	// 若 txId 非零，一并解冻
+	if entry.TxId != (common.Hash{}) {
+		cb.Unfreeze(entry.ContractAddr, entry.ShardId, entry.Key, entry.TxId)
+		utils.Logger().Debug().
+			Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
+			Str("txId", entry.TxId.Hex()).Str("from", from).
+			Msg("[JOYUE] unfrozen after P2P commit update")
+	}
+
+	valueUint := new(big.Int).SetBytes(entry.Value)
+	utils.Logger().Debug().
+		Str("contract", entry.ContractAddr.Hex()).
+		Str("key", entry.Key.Hex()).
+		Uint64("version", entry.Version).
+		Str("txId", entry.TxId.Hex()).
+		Str("valueUint", valueUint.String()).
+		Int("valueLen", len(entry.Value)).
+		Str("from", from).
+		Msg("[JOYUE] received cache update from P2P")
+}
+
 // ProcessBlockLogs 处理区块中的日志，查找 StateBroadcast 事件
 // 接受 Harmony 的 types.Block 和 types.Receipts
-func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.Receipts) {
+func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.Receipts, shouldBroadcast bool) {
 	if receipts == nil {
 		utils.Logger().Debug().
 			Uint64("block", block.NumberU64()).
@@ -323,8 +343,10 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 		Uint64("block", block.NumberU64()).
 		Int("receiptsCount", len(receipts)).
 		Str("eventSig", cb.eventSig.Hex()).
+		Bool("shouldBroadcast", shouldBroadcast).
 		Msg("[JOYUE] ProcessBlockLogs: processing block logs")
 
+	entriesToBroadcast := make([]*CacheEntry, 0)
 	for _, receipt := range receipts {
 		if receipt.Status != ethtypes.ReceiptStatusSuccessful {
 			continue
@@ -384,19 +406,15 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 						Msg("[JOYUE] ProcessBlockLogs: unfrozen after commit (StateBroadcast)")
 				}
 
-				cacheKey := cb.cacheKey(entry.ContractAddr, entry.ShardId, entry.Key)
-				if err := cb.broadcastCacheUpdateImmediate(entry); err != nil {
-					utils.Logger().Error().Err(err).
-						Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
-						Msg("[JOYUE] failed to broadcast cache update immediately")
-				} else {
+				if shouldBroadcast {
 					valueUint := new(big.Int).SetBytes(entry.Value)
+					entriesToBroadcast = append(entriesToBroadcast, entry)
 					utils.Logger().Debug().
 						Str("contract", entry.ContractAddr.Hex()).Str("key", entry.Key.Hex()).
-						Str("cacheKey", cacheKey).Uint64("version", entry.Version).
+						Uint64("version", entry.Version).
 						Str("txId", entry.TxId.Hex()).
 						Str("valueUint", valueUint.String()).Uint64("block", block.NumberU64()).
-						Msg("[JOYUE] cache updated and broadcasted immediately")
+						Msg("[JOYUE] queued cache update for batch broadcast")
 				}
 
 			case cb.unfreezeSig:
@@ -420,15 +438,31 @@ func (cb *CacheBroadcaster) ProcessBlockLogs(block *types.Block, receipts types.
 					Str("txId", txId.Hex()).
 					Msg("[JOYUE] ProcessBlockLogs: unfrozen after rollback (StateUnfreeze)")
 
-				if err := cb.broadcastUnfreezeImmediate(contractAddr, shardId, key, txId); err != nil {
-					utils.Logger().Error().Err(err).
-						Str("contract", contractAddr.Hex()).Str("key", key.Hex()).
-						Msg("[JOYUE] failed to broadcast unfreeze immediately")
+				if shouldBroadcast {
+					if err := cb.broadcastUnfreezeImmediate(contractAddr, shardId, key, txId); err != nil {
+						utils.Logger().Error().Err(err).
+							Str("contract", contractAddr.Hex()).Str("key", key.Hex()).
+							Msg("[JOYUE] failed to broadcast unfreeze immediately")
+					}
 				}
 
 			default:
 				// 非目标事件，跳过
 			}
+		}
+	}
+
+	if shouldBroadcast && len(entriesToBroadcast) > 0 {
+		if err := cb.broadcastCacheUpdatesBatch(entriesToBroadcast); err != nil {
+			utils.Logger().Error().Err(err).
+				Uint64("block", block.NumberU64()).
+				Int("entries", len(entriesToBroadcast)).
+				Msg("[JOYUE] failed to broadcast cache update batch")
+		} else {
+			utils.Logger().Debug().
+				Uint64("block", block.NumberU64()).
+				Int("entries", len(entriesToBroadcast)).
+				Msg("[JOYUE] cache update batch broadcasted")
 		}
 	}
 }
@@ -726,6 +760,32 @@ func (cb *CacheBroadcaster) broadcastCacheUpdateImmediate(entry *CacheEntry) err
 	return nil
 }
 
+// broadcastCacheUpdatesBatch 通过一条 P2P 消息广播本区块内的多条缓存更新。
+func (cb *CacheBroadcaster) broadcastCacheUpdatesBatch(entries []*CacheEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	msg := cb.serializeCacheEntries(entries)
+	topic, err := cb.host.GetOrJoin(cb.topic)
+	if err != nil {
+		return fmt.Errorf("failed to get topic: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(cb.ctx, 1*time.Second)
+	defer cancel()
+
+	if err := topic.Publish(ctx, msg); err != nil {
+		return fmt.Errorf("failed to publish cache update batch: %w", err)
+	}
+
+	utils.Logger().Debug().
+		Int("entries", len(entries)).
+		Msg("[JOYUE] cache update batch broadcasted immediately")
+
+	return nil
+}
+
 // serializeCacheEntry 序列化缓存条目（type=0x02，含 txId）
 // 格式：[1 type=0x02][20 contractAddr][4 shardId][32 key][8 version][32 txId][4 valueLen][valueLen value]
 func (cb *CacheBroadcaster) serializeCacheEntry(entry *CacheEntry) []byte {
@@ -746,6 +806,32 @@ func (cb *CacheBroadcaster) serializeCacheEntry(entry *CacheEntry) []byte {
 	binary.BigEndian.PutUint32(buf[offset:], uint32(len(entry.Value)))
 	offset += 4
 	copy(buf[offset:], entry.Value)
+	return buf
+}
+
+// serializeCacheEntries 序列化批量缓存条目。
+// 格式：[1 type=0x04][4 count][4 entryLen][entry bytes]...
+func (cb *CacheBroadcaster) serializeCacheEntries(entries []*CacheEntry) []byte {
+	entryPayloads := make([][]byte, 0, len(entries))
+	totalLen := 1 + 4
+	for _, entry := range entries {
+		payload := cb.serializeCacheEntry(entry)
+		entryPayloads = append(entryPayloads, payload)
+		totalLen += 4 + len(payload)
+	}
+
+	buf := make([]byte, totalLen)
+	offset := 0
+	buf[offset] = 0x04
+	offset++
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(entryPayloads)))
+	offset += 4
+	for _, payload := range entryPayloads {
+		binary.BigEndian.PutUint32(buf[offset:], uint32(len(payload)))
+		offset += 4
+		copy(buf[offset:], payload)
+		offset += len(payload)
+	}
 	return buf
 }
 
@@ -810,6 +896,48 @@ func (cb *CacheBroadcaster) deserializeCacheEntry(data []byte) (*CacheEntry, err
 	default:
 		return nil, fmt.Errorf("unsupported message type: 0x%02x", msgType)
 	}
+}
+
+// deserializeCacheEntries 反序列化批量缓存条目（type=0x04）。
+func (cb *CacheBroadcaster) deserializeCacheEntries(data []byte) ([]*CacheEntry, error) {
+	if len(data) < 1+4 {
+		return nil, fmt.Errorf("invalid batch message length: %d", len(data))
+	}
+	if data[0] != 0x04 {
+		return nil, fmt.Errorf("invalid batch message type: 0x%02x", data[0])
+	}
+
+	count := int(binary.BigEndian.Uint32(data[1:5]))
+	if count > (len(data)-5)/5 {
+		return nil, fmt.Errorf("invalid batch entry count: %d", count)
+	}
+	entries := make([]*CacheEntry, 0, count)
+	offset := 5
+	for i := 0; i < count; i++ {
+		if len(data) < offset+4 {
+			return nil, fmt.Errorf("batch entry %d missing length", i)
+		}
+		entryLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		offset += 4
+		if entryLen == 0 {
+			return nil, fmt.Errorf("batch entry %d has empty payload", i)
+		}
+		if len(data) < offset+entryLen {
+			return nil, fmt.Errorf("batch entry %d truncated", i)
+		}
+
+		entry, err := cb.deserializeCacheEntry(data[offset : offset+entryLen])
+		if err != nil {
+			return nil, fmt.Errorf("batch entry %d: %w", i, err)
+		}
+		entries = append(entries, entry)
+		offset += entryLen
+	}
+	if offset != len(data) {
+		return nil, fmt.Errorf("batch message has %d trailing bytes", len(data)-offset)
+	}
+
+	return entries, nil
 }
 
 // cacheKey 生成缓存键

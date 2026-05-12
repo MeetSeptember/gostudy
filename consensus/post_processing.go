@@ -134,7 +134,7 @@ func (consensus *Consensus) postConsensusProcessing(newBlock *types.Block) error
 	if cacheBroadcaster != nil {
 		receipts := consensus.Blockchain().GetReceiptsByHash(newBlock.Hash())
 		if receipts != nil {
-			cacheBroadcaster.ProcessBlockLogs(newBlock, receipts)
+			cacheBroadcaster.ProcessBlockLogs(newBlock, receipts, consensus.IsLeader())
 		}
 	}
 
