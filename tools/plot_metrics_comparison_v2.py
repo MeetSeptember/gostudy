@@ -3,7 +3,8 @@
 Version 2：按「类型」分组柱状图（x = ERC20 / AMM / NFT / Bot），每组 4 根柱对应
 Sparrow / Joyue / 2PC / Chainspace（样式参考分组柱：颜色 + hatch + 黑边；Chainspace 柱为横线纹理）。
 
-- TPS（两套分组柱）：（1）原定义：计数落在 [mean(send),mean(完成)] 内 / L；（2）均值窗：有效完成条数 / L，L=mean(完成)−mean(send)。
+- TPS（**一张**分组柱）：有效完成条数 / W，W(秒) = (max(完成时间) − min(trigger.send_time)) / 1000；
+  完成时间用 ``completion_timestamps_ms``（与 plot_erc20_metrics_comparison 一致）。
 - 任务成功率：折线图，x=合约类型，每条线=一种实现；y=成功条数/总条数。
 - 平均确认延迟：分组柱（与 TPS 相同 x/分组），每根柱为按 tx_id 对齐后 (completion−trigger.send) 的样本均值（毫秒）。
 - 锁 abort 率（临时）：折线图，x=合约类型，每条线=一种实现；y=失败条数/总条数（失败暂视为锁 abort）。
@@ -88,8 +89,8 @@ def mean_send_to_completion_ms(metrics: pd.DataFrame, trig: pd.DataFrame) -> flo
     return float(max(0.0, comp.mean() - st.mean()))
 
 
-def build_matrices(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """shape (4 suites, n_schemes): TPS（区间内）、TPS（均值窗）、确认延迟、成功率、abort。"""
+def build_matrices(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """shape (4 suites, n_schemes): TPS（min(send)～max(完成) 窗）、确认延迟、成功率、abort。"""
     root = root.resolve()
     presets = m1.dataset_presets(root)
     ref_sets = presets["erc20"][2]
@@ -97,7 +98,6 @@ def build_matrices(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
     n_su = len(SUITES_ORDER)
     n_sc = len(scheme_labels)
     tps_m = np.zeros((n_su, n_sc))
-    tps_span_m = np.zeros((n_su, n_sc))
     exec_m = np.zeros((n_su, n_sc))
     success_m = np.zeros((n_su, n_sc))
     abort_m = np.zeros((n_su, n_sc))
@@ -113,8 +113,7 @@ def build_matrices(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
                 continue
             met = m1.load_metrics_csv(csv_p)
             trig = m1.load_trigger_jsonl(jsonl_p)
-            tps_m[i, j] = m1.tps_mean_completion_minus_send_window(met, trig)
-            tps_span_m[i, j] = m1.tps_mean_span_throughput(met, trig)
+            tps_m[i, j] = m1.tps_min_send_max_completion_window(met, trig)
             exec_m[i, j] = mean_send_to_completion_ms(met, trig)
             if met.empty:
                 continue
@@ -126,7 +125,7 @@ def build_matrices(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
             oks = int((outcomes == "成功").sum())
             abort_m[i, j] = fails / float(n)
             success_m[i, j] = oks / float(n)
-    return tps_m, tps_span_m, exec_m, success_m, abort_m, scheme_labels
+    return tps_m, exec_m, success_m, abort_m, scheme_labels
 
 
 def plot_grouped_metric(
@@ -223,7 +222,7 @@ def plot_implementation_lines(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Metrics v2: two TPS bar charts + latency + success/abort lines across suites."
+        description="Metrics v2: one TPS bar chart (min(send)–max(completion) window) + latency + success/abort."
     )
     ap.add_argument("--root", type=Path, default=Path("."))
     ap.add_argument("--out", type=Path, default=None, help="output PNG (default: <root>/metrics-comparison-v2.png)")
@@ -231,29 +230,21 @@ def main() -> None:
     root = args.root.resolve()
     out = args.out.resolve() if args.out is not None else root / "metrics-comparison-v2.png"
 
-    tps_m, tps_span_m, exec_m, success_m, abort_m, schemes = build_matrices(root)
+    tps_m, exec_m, success_m, abort_m, schemes = build_matrices(root)
 
-    fig, axes = plt.subplots(5, 1, figsize=(10, 16), constrained_layout=True)
+    fig, axes = plt.subplots(4, 1, figsize=(10, 13), constrained_layout=True)
     fig.suptitle("跨类型对比（v2）", fontsize=14, fontweight="bold")
 
     plot_grouped_metric(
         axes[0],
         tps_m,
         schemes,
-        "TPS（区间内）",
-        "完成 TPS（区间内）\nL=mean(完成)−mean(send)；计数∈[mean(send),mean(完成)]",
+        "TPS",
+        "完成 TPS\nW=(max(完成时间)−min(send_time))/1s；分子=有效完成条数（completion_timestamps_ms）",
         "{:.1f}",
     )
     plot_grouped_metric(
         axes[1],
-        tps_span_m,
-        schemes,
-        "TPS（均值窗）",
-        "完成 TPS（均值窗）\n有效完成条数 / ((mean(完成)−mean(send))/1s)；L 同上",
-        "{:.1f}",
-    )
-    plot_grouped_metric(
-        axes[2],
         exec_m,
         schemes,
         "平均确认延迟 (ms)",
@@ -261,7 +252,7 @@ def main() -> None:
         "{:.0f}",
     )
     plot_implementation_lines(
-        axes[3],
+        axes[2],
         success_m,
         schemes,
         "任务成功率",
@@ -269,7 +260,7 @@ def main() -> None:
         y_top=1.02,
     )
     plot_implementation_lines(
-        axes[4],
+        axes[3],
         abort_m,
         schemes,
         "锁 abort 率（临时）",
@@ -280,8 +271,8 @@ def main() -> None:
     fig.text(
         0.5,
         0.01,
-        "说明：TPS（区间内）与 TPS（均值窗）分母均为 L=mean(完成)−mean(send)(秒)，前者分子为落在"
-        "[mean(send),mean(完成)] 的完成条数，后者为全部有效完成条数。"
+        "说明：TPS 分母 W 为观测窗（秒）= (metrics 上 max(完成时间) − trigger 上 min(send_time))/1000，"
+        "完成时间规则同 plot_erc20_metrics_comparison.completion_timestamps_ms；分子为该表上有效完成条数。"
         "确认延迟按 tx_id 对齐；成功率=成功/总数；abort率=失败/总数（失败暂视为锁 abort）。",
         ha="center",
         fontsize=8,

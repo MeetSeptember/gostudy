@@ -180,6 +180,30 @@ def tps_mean_span_throughput(metrics: pd.DataFrame, trig: pd.DataFrame) -> float
     return n / (span_ms / 1000.0)
 
 
+def tps_min_send_max_completion_window(metrics: pd.DataFrame, trig: pd.DataFrame) -> float:
+    """
+    TPS：有效完成条数 / W，W（秒）= (max(完成时间) − min(trigger.send_time)) / 1000。
+    完成时间使用 completion_timestamps_ms；trigger 使用 send_time 的全局最小。
+    """
+    if trig.empty or metrics.empty or "send_time" not in trig.columns:
+        return 0.0
+    st = pd.to_numeric(trig["send_time"], errors="coerce").dropna()
+    comp = completion_timestamps_ms(metrics).dropna()
+    if st.empty or comp.empty:
+        return 0.0
+    t0 = float(st.min())
+    t1 = float(comp.max())
+    if not np.isfinite(t0) or not np.isfinite(t1):
+        return 0.0
+    w_ms = t1 - t0
+    if w_ms <= 0:
+        return 0.0
+    n = int(len(comp))
+    if n == 0:
+        return 0.0
+    return n / (w_ms / 1000.0)
+
+
 def classify_outcome(row) -> str:
     """success / failure from metrics row."""
     ok = False
